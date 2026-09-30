@@ -1,0 +1,8 @@
+{
+  "name": "visocex",
+  "private": true,
+  "dependencies": {
+    "@netlify/blobs": "^8.1.0",
+    "@anthropic-ai/sdk": "^0.32.1"
+  }
+}

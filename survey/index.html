@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Survey — Vi-SOCEX</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: 'Inter', -apple-system, sans-serif; background: #07192E; color: #fff; min-height: 100vh; }
+  input, textarea, select { font-family: inherit; }
+  ::placeholder { color: #5E7396; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spin { animation: spin 1s linear infinite; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect } = React;
+
+const C = {
+  bg: "#07192E", surface: "#0F2A4A", raised: "#132B4D", border: "#22406B",
+  ink: "#FFFFFF", inkMuted: "#A8B3C7", inkFaint: "#5E7396",
+  green: "#65C466", amber: "#F59E0B", purple: "#8B5CF6", teal: "#2DD4BF",
+};
+
+function uid() { return Math.random().toString(36).slice(2, 10); }
+function todayISO() { return new Date().toISOString().slice(0, 10); }
+function optionScore(i) { return [5, 2.5, 0, null][i]; }
+
+function flattenQuestionnaireGroups(groups) {
+  const flat = [];
+  (groups || []).forEach(g => {
+    (g.questions || []).forEach(q => {
+      flat.push({ ...q, groupId: g.id, groupName: g.name, guidance: g.guidance });
+    });
+  });
+  return flat;
+}
+
+const inputStyle = {
+  background: C.raised, border: `1px solid ${C.border}`, borderRadius: 7,
+  padding: "9px 12px", color: C.ink, fontSize: 13.5, outline: "none",
+};
+
+function CheckIcon({ size = 18, color = "#fff" }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+function LoaderIcon({ size = 18, color = "#fff" }) {
+  return (
+    <svg className="spin" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round">
+      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+    </svg>
+  );
+}
+
+function Shell({ template, children }) {
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", justifyContent: "center", padding: "48px 20px" }}>
+      <div style={{ width: "100%", maxWidth: 640 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 28 }}>
+          <div style={{ width: 30, height: 30, borderRadius: 8, background: (template && template.color) || C.purple, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 15 }}>V</div>
+          <div style={{ fontSize: 12.5, color: C.inkFaint }}>Survey</div>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const params = new URLSearchParams(window.location.search);
+  const tenantId = params.get("t");
+  const templateId = params.get("q");
+
+  const [loadState, setLoadState] = useState("loading"); // loading | error | ready
+  const [errorMsg, setErrorMsg] = useState("");
+  const [template, setTemplate] = useState(null);
+  const [step, setStep] = useState("setup"); // setup | questions | review | complete
+  const [orgLevel, setOrgLevel] = useState("");
+  const [teamName, setTeamName] = useState("");
+  const [respondentName, setRespondentName] = useState("");
+  const [answers, setAnswers] = useState([]);
+  const [qIndex, setQIndex] = useState(0);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!tenantId || !templateId) { setLoadState("error"); setErrorMsg("This link is missing information — ask whoever sent it for the correct link."); return; }
+    fetch(`/api/public-survey?tenant=${encodeURIComponent(tenantId)}&template=${encodeURIComponent(templateId)}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) { setErrorMsg(data.error); setLoadState("error"); return; }
+        setTemplate(data.template);
+        setAnswers(new Array(flattenQuestionnaireGroups(data.template.groups).length).fill(null));
+        setLoadState("ready");
+      })
+      .catch(() => { setErrorMsg("Couldn't load this survey — check your connection and try again."); setLoadState("error"); });
+  }, []);
+
+  if (loadState === "loading") {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <LoaderIcon size={28} color={C.inkFaint} />
+      </div>
+    );
+  }
+  if (loadState === "error") {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <div style={{ maxWidth: 420, textAlign: "center" }}>
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 18, fontWeight: 700, marginBottom: 10 }}>Survey unavailable</div>
+          <div style={{ fontSize: 14, color: C.inkMuted, lineHeight: 1.6 }}>{errorMsg}</div>
+        </div>
+      </div>
+    );
+  }
+
+  const isInternal = template.audienceType === "internal";
+  const flat = flattenQuestionnaireGroups(template.groups);
+
+  function selectOption(optionIndex) {
+    const q = flat[qIndex];
+    const next = [...answers];
+    next[qIndex] = { groupId: q.groupId, groupName: q.groupName, topic: q.topic, text: q.text, answerLabel: q.options[optionIndex], score: optionScore(optionIndex), optionIndex };
+    setAnswers(next);
+  }
+  function toggleMultiOption(opt) {
+    const q = flat[qIndex];
+    const current = answers[qIndex];
+    const existing = (current && current.answerLabels) || [];
+    let nextLabels;
+    if (existing.includes(opt)) nextLabels = existing.filter(o => o !== opt);
+    else { if (q.maxSelections && existing.length >= q.maxSelections) return; nextLabels = [...existing, opt]; }
+    const next = [...answers];
+    next[qIndex] = nextLabels.length > 0 ? { groupId: q.groupId, groupName: q.groupName, topic: q.topic, text: q.text, answerLabels: nextLabels, score: null } : null;
+    setAnswers(next);
+  }
+  function setTextAnswer(value) {
+    const q = flat[qIndex];
+    const next = [...answers];
+    next[qIndex] = { groupId: q.groupId, groupName: q.groupName, topic: q.topic, text: q.text, answerText: value, score: null };
+    setAnswers(next);
+  }
+  function setMatrixRating(item, scaleIndex) {
+    const q = flat[qIndex];
+    const current = answers[qIndex];
+    const ratings = { ...((current && current.ratings) || {}), [item]: scaleIndex };
+    const next = [...answers];
+    next[qIndex] = { groupId: q.groupId, groupName: q.groupName, topic: q.topic, text: q.text, ratings, score: null };
+    setAnswers(next);
+  }
+  function toggleRankItem(item) {
+    const q = flat[qIndex];
+    const current = answers[qIndex];
+    const existing = (current && current.rankedItems) || [];
+    let nextRanked;
+    if (existing.includes(item)) nextRanked = existing.filter(o => o !== item);
+    else { if (q.rankCount && existing.length >= q.rankCount) return; nextRanked = [...existing, item]; }
+    const next = [...answers];
+    next[qIndex] = nextRanked.length > 0 ? { groupId: q.groupId, groupName: q.groupName, topic: q.topic, text: q.text, rankedItems: nextRanked, score: null } : null;
+    setAnswers(next);
+  }
+  function goNext() { if (qIndex < flat.length - 1) setQIndex(qIndex + 1); else setStep("review"); }
+  function goPrev() { if (qIndex > 0) setQIndex(qIndex - 1); }
+
+  async function submit() {
+    setSubmitting(true);
+    try {
+      await fetch(`/api/public-survey?tenant=${encodeURIComponent(tenantId)}&template=${encodeURIComponent(templateId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orgLevel: isInternal ? orgLevel : "", teamName: teamName.trim(), respondentName: respondentName.trim(), answers: answers.filter(Boolean) }),
+      });
+    } catch (e) {}
+    setSubmitting(false);
+    setStep("complete");
+  }
+
+  if (step === "setup") {
+    return (
+      <Shell template={template}>
+        <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 24, fontWeight: 700, marginBottom: 8 }}>{template.name}</h1>
+        {template.description && <div style={{ fontSize: 14, color: C.inkMuted, marginBottom: 20, lineHeight: 1.6 }}>{template.description}</div>}
+        <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: 22 }}>
+          <div style={{ fontSize: 13, color: C.inkMuted, marginBottom: 16 }}>{flat.length} questions. {template.mode === "selfAssessment" ? "You'll see guidance for each answer as you go." : "Responses are used to understand overall sentiment."}</div>
+          {isInternal ? (
+            <React.Fragment>
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ fontSize: 12.5, color: C.inkMuted, display: "block", marginBottom: 6 }}>Your organisational level</label>
+                <select value={orgLevel} onChange={e => setOrgLevel(e.target.value)} style={{ ...inputStyle, width: "100%" }}>
+                  <option value="">Select one…</option>
+                  <option value="Frontline">Frontline</option>
+                  <option value="Team Lead">Team Lead</option>
+                  <option value="Manager">Manager</option>
+                  <option value="Senior Leadership">Senior Leadership</option>
+                </select>
+              </div>
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 12.5, color: C.inkMuted, display: "block", marginBottom: 6 }}>Team name (optional)</label>
+                <input value={teamName} onChange={e => setTeamName(e.target.value)} style={{ ...inputStyle, width: "100%" }} placeholder="e.g. Warehouse Team A" />
+              </div>
+            </React.Fragment>
+          ) : (
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ fontSize: 12.5, color: C.inkMuted, display: "block", marginBottom: 6 }}>Your name (optional)</label>
+              <input value={respondentName} onChange={e => setRespondentName(e.target.value)} style={{ ...inputStyle, width: "100%" }} placeholder="e.g. Priya Shah" />
+            </div>
+          )}
+          <button onClick={() => setStep("questions")} style={{ background: template.color || C.purple, color: "#fff", border: "none", padding: "10px 22px", borderRadius: 7, fontSize: 14, fontWeight: 600, cursor: "pointer" }}>Start</button>
+        </div>
+      </Shell>
+    );
+  }
+
+  if (step === "questions") {
+    const q = flat[qIndex];
+    const current = answers[qIndex];
+    const qType = q.type || "single";
+    const progress = Math.round(((qIndex + 1) / flat.length) * 100);
+    const canProceed = qType === "text" ? true
+      : qType === "matrix" ? (current && q.items.every(item => current.ratings && current.ratings[item] != null))
+      : qType === "ranking" ? (current && current.rankedItems && current.rankedItems.length >= (q.rankCount || q.items.length))
+      : !!current;
+    return (
+      <Shell template={template}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: C.inkMuted, marginBottom: 6 }}>
+          <span>{q.groupName} · {q.topic}</span>
+          <span>{progress}%</span>
+        </div>
+        <div style={{ height: 4, background: C.raised, borderRadius: 2, marginBottom: 20 }}>
+          <div style={{ height: 4, width: `${progress}%`, background: template.color || C.purple, borderRadius: 2 }}></div>
+        </div>
+        <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: 22 }}>
+          <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>{q.text}</div>
+
+          {qType === "single" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {q.options.map((opt, i) => {
+                const selected = current && current.answerLabel === opt;
+                return (
+                  <button key={i} onClick={() => selectOption(i)} style={{ textAlign: "left", padding: "10px 14px", borderRadius: 7, fontSize: 13.5, cursor: "pointer", border: selected ? `1px solid ${template.color}` : `1px solid ${C.border}`, background: selected ? `${template.color}1F` : "none", color: selected ? C.ink : C.inkMuted }}>{opt}</button>
+                );
+              })}
+            </div>
+          )}
+
+          {qType === "multi" && (
+            <div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {q.options.map((opt, i) => {
+                  const selected = current && (current.answerLabels || []).includes(opt);
+                  return (
+                    <button key={i} onClick={() => toggleMultiOption(opt)} style={{ textAlign: "left", padding: "10px 14px", borderRadius: 7, fontSize: 13.5, cursor: "pointer", display: "flex", alignItems: "center", gap: 10, border: selected ? `1px solid ${template.color}` : `1px solid ${C.border}`, background: selected ? `${template.color}1F` : "none", color: selected ? C.ink : C.inkMuted }}>
+                      <span style={{ width: 15, height: 15, borderRadius: 4, border: `1.5px solid ${selected ? template.color : C.inkFaint}`, background: selected ? template.color : "none", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        {selected && <CheckIcon size={10} color="#fff" />}
+                      </span>
+                      {opt}
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ fontSize: 11, color: C.inkFaint, marginTop: 10 }}>Select all that apply{q.maxSelections ? ` — up to ${q.maxSelections}` : ""}.</div>
+            </div>
+          )}
+
+          {qType === "text" && (
+            <textarea value={(current && current.answerText) || ""} onChange={e => setTextAnswer(e.target.value)} rows={4} style={{ ...inputStyle, width: "100%", resize: "vertical", fontSize: 13.5 }} placeholder="Type your answer…" />
+          )}
+
+          {qType === "matrix" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              {q.items.map((item, ii) => {
+                const rating = current && current.ratings ? current.ratings[item] : null;
+                return (
+                  <div key={ii}>
+                    <div style={{ fontSize: 13, marginBottom: 6, color: C.ink }}>{item}</div>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {q.scaleLabels.map((label, si) => {
+                        const selected = rating === si;
+                        return (
+                          <button key={si} onClick={() => setMatrixRating(item, si)} style={{ padding: "6px 12px", borderRadius: 6, fontSize: 12, cursor: "pointer", border: selected ? `1px solid ${template.color}` : `1px solid ${C.border}`, background: selected ? `${template.color}1F` : "none", color: selected ? C.ink : C.inkMuted }}>{label}</button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {qType === "ranking" && (
+            <div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {q.items.map((item, i) => {
+                  const rank = current && current.rankedItems ? current.rankedItems.indexOf(item) : -1;
+                  const selected = rank >= 0;
+                  return (
+                    <button key={i} onClick={() => toggleRankItem(item)} style={{ textAlign: "left", padding: "10px 14px", borderRadius: 7, fontSize: 13.5, cursor: "pointer", display: "flex", alignItems: "center", gap: 10, border: selected ? `1px solid ${template.color}` : `1px solid ${C.border}`, background: selected ? `${template.color}1F` : "none", color: selected ? C.ink : C.inkMuted }}>
+                      <span style={{ width: 20, height: 20, borderRadius: "50%", border: `1.5px solid ${selected ? template.color : C.inkFaint}`, background: selected ? template.color : "none", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: selected ? "#fff" : "transparent" }}>{selected ? rank + 1 : "•"}</span>
+                      {item}
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ fontSize: 11, color: C.inkFaint, marginTop: 10 }}>Click to rank your top {q.rankCount || q.items.length}, in order — click again to remove.</div>
+            </div>
+          )}
+
+          {template.mode === "selfAssessment" && qType === "single" && current && current.optionIndex < 3 && q.advice && q.advice[current.optionIndex] && (
+            <div style={{ marginTop: 14, background: C.raised, border: `1px solid ${template.color}`, borderRadius: 8, padding: "12px 14px" }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: template.color, marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.3 }}>Guidance for this answer</div>
+              <div style={{ fontSize: 12.5, color: C.ink, lineHeight: 1.5 }}>{q.advice[current.optionIndex]}</div>
+            </div>
+          )}
+          <div style={{ fontSize: 11.5, color: C.inkFaint, marginTop: 16, lineHeight: 1.5 }}>{q.guidance}</div>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16 }}>
+          <button onClick={goPrev} disabled={qIndex === 0} style={{ background: "none", border: `1px solid ${C.border}`, padding: "8px 16px", borderRadius: 7, fontSize: 13, cursor: qIndex === 0 ? "default" : "pointer", color: qIndex === 0 ? C.inkFaint : C.ink, opacity: qIndex === 0 ? 0.5 : 1 }}>Previous</button>
+          <span style={{ fontSize: 12, color: C.inkFaint }}>Question {qIndex + 1} of {flat.length}</span>
+          <button onClick={goNext} disabled={!canProceed} style={{ background: template.color || C.purple, color: "#fff", border: "none", padding: "8px 18px", borderRadius: 7, fontSize: 13, fontWeight: 600, cursor: canProceed ? "pointer" : "default", opacity: canProceed ? 1 : 0.5 }}>{qIndex === flat.length - 1 ? "Review" : "Next"}</button>
+        </div>
+      </Shell>
+    );
+  }
+
+  if (step === "review") {
+    return (
+      <Shell template={template}>
+        <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 17, fontWeight: 700, marginBottom: 6 }}>Review your answers</h3>
+        <div style={{ fontSize: 12.5, color: C.inkMuted, marginBottom: 16 }}>Check everything looks right, then submit.</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+          {answers.map((a, i) => a && (
+            <div key={i} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 14px" }}>
+              <div style={{ fontSize: 11, color: C.inkFaint }}>{a.groupName} · {a.topic}</div>
+              <div style={{ fontSize: 13, marginTop: 2 }}>
+                {a.answerLabel || (a.answerLabels && a.answerLabels.join(", ")) || a.answerText
+                  || (a.rankedItems && a.rankedItems.map((it, ri) => `${ri + 1}. ${it}`).join(" · "))
+                  || (a.ratings && Object.entries(a.ratings).map(([item, idx]) => {
+                      const fq = flat.find(fqq => fqq.groupId === a.groupId && fqq.topic === a.topic);
+                      return `${item}: ${fq && fq.scaleLabels ? fq.scaleLabels[idx] : idx}`;
+                    }).join(" · "))
+                  || <span style={{ color: C.inkFaint, fontStyle: "italic" }}>(no answer)</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={submit} disabled={submitting} style={{ background: template.color || C.purple, color: "#fff", border: "none", padding: "9px 18px", borderRadius: 7, fontSize: 14, fontWeight: 600, cursor: submitting ? "default" : "pointer", display: "flex", alignItems: "center", gap: 8, opacity: submitting ? 0.7 : 1 }}>
+            {submitting && <LoaderIcon size={13} />}
+            {submitting ? "Submitting…" : "Submit questionnaire"}
+          </button>
+          <button onClick={() => setStep("questions")} style={{ background: "none", border: `1px solid ${C.border}`, padding: "9px 18px", borderRadius: 7, fontSize: 14, cursor: "pointer", color: C.ink }}>Back to questions</button>
+        </div>
+      </Shell>
+    );
+  }
+
+  // step === "complete"
+  const scored = answers.filter(a => a && a.score != null);
+  const overallAvg = scored.length ? scored.reduce((s, a) => s + a.score, 0) / scored.length : null;
+  const overallStatus = overallAvg == null ? null : overallAvg >= 4 ? { label: "Strong", color: C.green } : overallAvg >= 2.5 ? { label: "Developing", color: C.amber } : { label: "At Risk", color: "#E5484D" };
+  const groupSummaries = template.mode === "selfAssessment" ? template.groups.map(g => {
+    const gAnswers = answers.filter(a => a && a.groupId === g.id && a.score != null);
+    const avg = gAnswers.length ? gAnswers.reduce((s, a) => s + a.score, 0) / gAnswers.length : null;
+    return { name: g.name, avg };
+  }) : [];
+
+  if (template.mode === "selfAssessment") {
+    return (
+      <Shell template={template}>
+        <div style={{ maxWidth: 560, margin: "0 auto" }}>
+          <div style={{ textAlign: "center", marginBottom: 24 }}>
+            <div style={{ width: 48, height: 48, borderRadius: "50%", background: `${template.color}22`, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 12px" }}>
+              <CheckIcon size={22} color={template.color} />
+            </div>
+            <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 18, fontWeight: 700, margin: 0 }}>Assessment complete</h3>
+            {overallStatus && <div style={{ fontSize: 13, color: overallStatus.color, fontWeight: 600, marginTop: 6 }}>Overall: {overallStatus.label}</div>}
+          </div>
+          {groupSummaries.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 24 }}>
+              {groupSummaries.map((g, i) => {
+                const status = g.avg == null ? null : g.avg >= 4 ? C.green : g.avg >= 2.5 ? C.amber : "#E5484D";
+                return (
+                  <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 14px" }}>
+                    <span style={{ fontSize: 13 }}>{g.name}</span>
+                    {status && <span style={{ width: 10, height: 10, borderRadius: "50%", background: status }}></span>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <div style={{ background: C.surface, border: `1px solid ${template.color}`, borderRadius: 10, padding: 20, textAlign: "center" }}>
+            <div style={{ fontSize: 13.5, color: C.ink, lineHeight: 1.5, marginBottom: 14 }}>{template.ctaMessage || "Did you find these results useful?"}</div>
+            {template.ctaButtonLabel && <button style={{ background: template.color, color: "#fff", border: "none", padding: "9px 20px", borderRadius: 7, fontSize: 13.5, fontWeight: 600, cursor: "pointer" }}>{template.ctaButtonLabel}</button>}
+          </div>
+        </div>
+      </Shell>
+    );
+  }
+
+  return (
+    <Shell template={template}>
+      <div style={{ maxWidth: 480, margin: "0 auto", textAlign: "center" }}>
+        <div style={{ width: 48, height: 48, borderRadius: "50%", background: `${template.color}22`, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
+          <CheckIcon size={22} color={template.color} />
+        </div>
+        <div style={{ fontSize: 14, color: C.ink, lineHeight: 1.6 }}>{template.completionMessage || "Thank you for taking part."}</div>
+      </div>
+    </Shell>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
