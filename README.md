@@ -7,11 +7,14 @@ Netlify site ID: `2020deec-311d-4d09-94e1-fdbaef4e7e1c`
 ## Structure
 | Path | What it is |
 |---|---|
-| `index.html` | Public landing page |
-| `app/index.html` | The whole app — single-file React (Babel in-browser) |
-| `survey/index.html` | Public questionnaire page (no login) |
+| `public/index.html` | Public landing page |
+| `public/app/index.html` | The whole app — single-file React (Babel in-browser) |
+| `public/survey/index.html` | Public questionnaire page (no login) |
 | `netlify/functions/` | Backend (Netlify Functions v2 + Netlify Blobs storage) |
-| `netlify.toml` | Publish root + functions directory |
+| `netlify.toml` | Publish dir (`public/` only) + functions directory |
+
+Only `public/` is published as static files. Everything else (function source, `package.json`,
+this README) stays out of the deploy so it can't be downloaded.
 
 ## Backend endpoints
 | Function | Route | Purpose |
@@ -33,7 +36,8 @@ Never commit these values.
 - `RESEND_FROM_EMAIL` — survey sender, e.g. `surveys@vi-tech.io`
 - `RESEND_AUTH_FROM_EMAIL` — optional; invite/reset sender (defaults to `info@<same domain>`)
 - `RESEND_FROM_NAME` — optional display name
-- `ADMIN_SEED_SECRET` — protects the admin-only `seed` / `admin-delete-user` auth actions
+- `ADMIN_SEED_SECRET` — protects the admin-only `seed` / `admin-delete-user` auth actions (marked secret,
+  functions scope only). `seed` only creates new logins; it refuses (409) if the email already has one.
 - Anthropic access is injected automatically by Netlify's AI Gateway (no key needed)
 
 ## Multi-user sync (important)
@@ -54,6 +58,7 @@ in that store, plus `[backup]` lines in the function log. Run on demand from Net
 These backups live on the same Netlify site — keep periodic off-site copies too.
 
 ## Deploying
-Deployed directly to the Netlify site above (no build step). From the repo root with the Netlify CLI:
+Deployed directly to the Netlify site above (no build step). From the repo root with the Netlify CLI
+(`netlify.toml` points it at `public/` and `netlify/functions/`):
 `netlify deploy --prod --site 2020deec-311d-4d09-94e1-fdbaef4e7e1c`
 Previous deploys remain available for instant rollback in the Netlify dashboard → Deploys.

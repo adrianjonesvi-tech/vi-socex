@@ -1,5 +1,7 @@
 [build]
-  publish = "."
+  # Only the public pages are published. Function source, package.json and
+  # other repo files stay out of the deploy so they can't be downloaded.
+  publish = "public"
 
 [functions]
   directory = "netlify/functions"
