@@ -1,6 +1,6 @@
 import type { Context, Config } from "@netlify/functions";
 import { getStore } from "@netlify/blobs";
-import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 
 // Data model note: "tenantsStore" holds one entry per USER LOGIN, keyed by
 // email. Multiple users can share the same `id` (their company/tenant ID) —
@@ -17,6 +17,17 @@ function json(body: unknown, status = 200) {
 
 function hashPassword(password: string, salt: string) {
   return scryptSync(password, salt, 64).toString("hex");
+}
+
+// Constant-time check of the X-Admin-Secret header. Both sides are hashed
+// first so the comparison doesn't leak the secret's length either.
+function adminSecretOk(req: Request) {
+  const expected = Netlify.env.get("ADMIN_SEED_SECRET");
+  const given = req.headers.get("X-Admin-Secret");
+  if (!expected || !given) return false;
+  const a = createHash("sha256").update(given).digest();
+  const b = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(a, b);
 }
 
 const INVITE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -268,11 +279,11 @@ export default async (req: Request, context: Context) => {
     return json({ ok: true });
   }
 
-  // Admin-only: create or update a user login directly. Protected by a secret
-  // set as an environment variable, never exposed to the frontend.
+  // Admin-only: create a new user login directly. Protected by a secret set as
+  // an environment variable, never exposed to the frontend. It never replaces
+  // an existing login — use the password reset flow for that.
   if (req.method === "POST" && action === "seed") {
-    const secret = req.headers.get("X-Admin-Secret");
-    if (!secret || secret !== Netlify.env.get("ADMIN_SEED_SECRET")) {
+    if (!adminSecretOk(req)) {
       return json({ error: "forbidden" }, 403);
     }
     let body: { id?: string; name?: string; email?: string; password?: string };
@@ -285,18 +296,20 @@ export default async (req: Request, context: Context) => {
     if (!id || !name || !email || !password) {
       return json({ error: "id, name, email, and password are required" }, 400);
     }
+    const normalizedEmail = email.trim().toLowerCase();
+    const existing = await tenantsStore.get(normalizedEmail, { type: "json", consistency: "strong" });
+    if (existing) return json({ error: "That email already has a login — seed won't overwrite it." }, 409);
     const salt = randomBytes(16).toString("hex");
     const passwordHash = hashPassword(password, salt);
-    await tenantsStore.setJSON(email.trim().toLowerCase(), {
-      id, name, email: email.trim().toLowerCase(), salt, passwordHash,
+    await tenantsStore.setJSON(normalizedEmail, {
+      id, name, email: normalizedEmail, salt, passwordHash,
     });
     return json({ ok: true });
   }
 
   // Admin-only: delete a user login. Protected the same way as "seed".
   if (req.method === "POST" && action === "admin-delete-user") {
-    const secret = req.headers.get("X-Admin-Secret");
-    if (!secret || secret !== Netlify.env.get("ADMIN_SEED_SECRET")) {
+    if (!adminSecretOk(req)) {
       return json({ error: "forbidden" }, 403);
     }
     let body: { email?: string };
