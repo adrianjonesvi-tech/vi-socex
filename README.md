@@ -24,7 +24,11 @@ this README) stays out of the deploy so it can't be downloaded.
 | `generate.mts` | `/api/generate` | AI generation (posts, articles, ad copy, brand/company/case-study extraction, questionnaires, overviews, vision) |
 | `market-report-background.mts` | `/api/market-report-background` | Long-running web-researched market reports (background function) |
 | `report-status.mts` | `/api/report-status` | Polling for market report jobs |
-| `send-email.mts` | `/api/send-email` | Questionnaire email distribution via Resend |
+| `send-email.mts` | `/api/send-email` | Queues a marketing email send (drops invalid, duplicate and unsubscribed/suppressed addresses) |
+| `send-email-background.mts` | `/api/send-email-background` | Sends a queued job via Resend's batch API with a per-recipient unsubscribe link (background function) |
+| `send-status.mts` | `/api/send-status` | Polling for send jobs |
+| `unsubscribe.mts` | `/api/unsubscribe` | Public unsubscribe page + one-click unsubscribe (signed links, no login) |
+| `suppressions.mts` | `/api/suppressions` | Workspace's unsubscribe list for the app; DELETE re-subscribes one address |
 | `public-survey.mts` | `/api/public-survey` | Public survey load/submit |
 | `assets.mts` | `/api/assets` | Binary file storage (≈4.5 MB per file limit) |
 | `scan-website.mts` | `/api/scan-website` | Website text/colour scan |
@@ -48,9 +52,18 @@ saved in between, the server returns **409 + the current value** and the browser
 `GET /api/data?versions=1` every 20 s (and on focus) and pull in changed sections. Saves without the
 header (old open tabs) are still accepted for backward compatibility.
 
+## Marketing email and unsubscribes
+Every send goes through `send-email` → `send-email-background`. Each email gets an unsubscribe link and
+`List-Unsubscribe` / one-click headers. Unsubscribes are stored in the `visocex-suppressions` store
+(`<tenantId>/<encoded email>`), not in the contacts list, so the server never overwrites a teammate's
+save; every send checks that store plus contacts whose status is Unsubscribed/Suppressed/Not eligible,
+whichever audience was picked. Open tabs pull the list and mark matching contacts Unsubscribed through
+the normal merge path. Send jobs (`visocex-send-jobs`) hold the per-job secret that signs unsubscribe
+links, so don't delete them — old emails' links stop working without them.
+
 ## Backups
 `backup-daily.mts` (scheduled, 00:00 UTC, logic in `netlify/lib/backup.mts`) copies `visocex-data`,
-`visocex-tenants` and `visocex-report-jobs` into the `visocex-backups` store under
+`visocex-tenants`, `visocex-report-jobs` and `visocex-suppressions` into the `visocex-backups` store under
 `daily/<YYYY-MM-DD>/<store>/<key>` (original metadata kept), writes `manifests/<date>`, copies uploaded
 files once to `assets/<key>`, and keeps 30 days. Outcome: `status/last-run` and `status/last-success`
 in that store, plus `[backup]` lines in the function log. Run on demand from Netlify → Logs → Functions

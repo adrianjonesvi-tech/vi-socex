@@ -1086,6 +1086,39 @@ function App({ tenant, onLogout, token, onUpdateTenant }) {
   }, [loaded, token]);
   useEffect(() => { if (tab === "team") apiListMembers(token).then(setTeamMembers).catch(() => {}); }, [tab, token]);
 
+  // Unsubscribes made through email links are kept on the server (see
+  // netlify/lib/email.mts), where every send checks them. Pull them in and mark
+  // matching contacts Unsubscribed, so the change is saved and merged like any
+  // other edit.
+  const [suppressedEmails, setSuppressedEmails] = useState([]);
+  useEffect(() => {
+    if (!loaded) return;
+    let stopped = false, lastPull = 0;
+    async function pull() {
+      if (Date.now() - lastPull < 60000) return;
+      lastPull = Date.now();
+      try {
+        const res = await fetch("/api/suppressions", { headers: __authHeaders(), cache: "no-store" });
+        if (!res.ok) return;
+        const { suppressions } = await res.json();
+        if (!stopped) setSuppressedEmails((suppressions || []).map(s => s.email));
+      } catch (e) {}
+    }
+    pull();
+    const iv = setInterval(pull, 5 * 60 * 1000);
+    window.addEventListener("focus", pull);
+    return () => { stopped = true; clearInterval(iv); window.removeEventListener("focus", pull); };
+  }, [loaded, token]);
+  useEffect(() => {
+    if (!loaded || suppressedEmails.length === 0) return;
+    const set = new Set(suppressedEmails);
+    const needs = c => c.email && set.has(c.email.trim().toLowerCase()) && c.marketingStatus !== "Unsubscribed";
+    if (!contacts.some(needs)) return;
+    setContacts(prev => prev.map(c => needs(c)
+      ? { ...c, marketingStatus: "Unsubscribed", consentHistory: [...(c.consentHistory || []), { status: "Unsubscribed", date: todayISO(), note: "Unsubscribed via email link" }] }
+      : c));
+  }, [suppressedEmails, contacts, loaded]);
+
   function setConnections(c) { setConnectionsState(c); }
   function setBrand(b) { setBrandState(b); }
   function setCompanyInfo(c) { setCompanyInfoState(c); }
@@ -1126,6 +1159,22 @@ function App({ tenant, onLogout, token, onUpdateTenant }) {
     return id;
   }
   function updateContact(id, patch) {
+    // Someone who unsubscribed by email link stays blocked on the server until a
+    // user confirms they've asked to be re-subscribed.
+    const current = contacts.find(c => c.id === id);
+    if (current && current.marketingStatus === "Unsubscribed" && patch.marketingStatus && !SUPPRESSED_STATUSES.includes(patch.marketingStatus)) {
+      const email = ((patch.email !== undefined ? patch.email : current.email) || "").trim().toLowerCase();
+      if (email && suppressedEmails.includes(email)) {
+        if (window.confirm(`${email} unsubscribed using the link in one of your emails.\n\nOnly re-subscribe them if they've asked you to. Re-subscribe them?`)) {
+          setSuppressedEmails(prev => prev.filter(e => e !== email));
+          fetch("/api/suppressions", { method: "DELETE", headers: __authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ email }) })
+            .then(r => { if (!r.ok) throw new Error(); })
+            .catch(() => alert(`Couldn't re-subscribe ${email} — they'll be marked Unsubscribed again and skipped when sending. Try again in a moment.`));
+        } else {
+          patch = { ...patch, marketingStatus: "Unsubscribed" };
+        }
+      }
+    }
     setContacts(prev => prev.map(c => {
       if (c.id !== id) return c;
       const next = { ...c, ...patch };
@@ -4494,6 +4543,7 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
   const [message, setMessage] = useState(`Hi there,\n\nWe'd really value your input. We've put together a short questionnaire — ${template.name} — and it should only take a few minutes.\n\n${template.description}\n\nThanks in advance,\nThe team`);
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState(null);
+  const [sendJobId, setSendJobId] = useState(null);
   const emailLists = connections.emailLists || [];
   const allContacts = contacts || [];
   const allCompanies = companies || [];
@@ -4525,12 +4575,37 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
       const data = await res.json();
       if (res.status === 401) setSendResult({ error: "Your session has expired — sign out and back in, then send again." });
       else if (res.status === 501) setSendResult({ needsSetup: true, message: data.error });
-      else setSendResult({ sent: data.sent || [], failed: data.failed || [], skipped: data.skipped || [] });
+      else if (!res.ok || !data.jobId) setSendResult({ error: data.error || "Couldn't send — try again.", skipped: data.skipped || [], suppressed: data.suppressed || [] });
+      else {
+        // Queued: the server sends in the background and this panel polls for progress.
+        setSendResult({ queued: data.queued, skipped: data.skipped || [], suppressed: data.suppressed || [], progress: null });
+        setSendJobId(data.jobId);
+        return;
+      }
     } catch (err) {
       setSendResult({ error: "Couldn't reach the email service — check your connection and try again." });
     }
     setSending(false);
   }
+  useEffect(() => {
+    if (!sendJobId) return;
+    let stopped = false;
+    (async () => {
+      while (!stopped) {
+        await new Promise(r => setTimeout(r, 3000));
+        if (stopped) return;
+        try {
+          const res = await fetch(`/api/send-status?jobId=${encodeURIComponent(sendJobId)}`, { headers: __authHeaders(), cache: "no-store" });
+          if (!res.ok) continue;
+          const p = await res.json();
+          if (stopped) return;
+          setSendResult(prev => ({ ...prev, progress: p }));
+          if (p.status === "done" || p.status === "partial" || p.status === "error") { setSending(false); setSendJobId(null); return; }
+        } catch (e) {}
+      }
+    })();
+    return () => { stopped = true; };
+  }, [sendJobId]);
 
   function send() {
     if (audienceType === "custom") {
@@ -4672,7 +4747,7 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
           <label style={{ fontSize: 11.5, color: C.inkMuted, display: "block", marginBottom: 4 }}>Body</label>
           <textarea value={message} onChange={e => setMessage(e.target.value)} rows={6} style={{ ...inputStyle, width: "100%", resize: "vertical" }} />
         </div>
-        <div style={{ fontSize: 10.5, color: C.inkFaint, marginTop: 8 }}>Pre-filled from the questionnaire's name and description — edit however you like before sending. The shareable link above is what respondents would actually click.</div>
+        <div style={{ fontSize: 10.5, color: C.inkFaint, marginTop: 8 }}>Pre-filled from the questionnaire's name and description — edit however you like before sending. The shareable link above is what respondents would actually click. An unsubscribe link is added to the end of every email automatically, and anyone who has unsubscribed is never emailed again, whichever list they're on.</div>
       </div>
 
       <button onClick={send} disabled={!canSend || sending} style={{ background: template.color, color: "#fff", border: "none", padding: "8px 16px", borderRadius: 7, fontSize: 13, fontWeight: 600, cursor: (canSend && !sending) ? "pointer" : "default", opacity: (canSend && !sending) ? 1 : 0.5, display: "flex", alignItems: "center", gap: 6 }}>
@@ -4688,13 +4763,24 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
       {sendResult && sendResult.error && (
         <div style={{ marginTop: 10, fontSize: 11.5, color: "#E5484D" }}>{sendResult.error}</div>
       )}
-      {sendResult && !sendResult.needsSetup && !sendResult.error && (
-        <div style={{ marginTop: 10, fontSize: 11.5, lineHeight: 1.6 }}>
-          {sendResult.sent.length > 0 && <div style={{ color: C.green }}>✓ Sent to {sendResult.sent.length} recipient{sendResult.sent.length === 1 ? "" : "s"}: {sendResult.sent.join(", ")}</div>}
-          {sendResult.failed.length > 0 && <div style={{ color: "#E5484D", marginTop: 4 }}>✕ Failed for {sendResult.failed.length}: {sendResult.failed.map(f => `${f.email} (${f.reason})`).join("; ")}</div>}
-          {sendResult.skipped.length > 0 && <div style={{ color: C.inkFaint, marginTop: 4 }}>Skipped {sendResult.skipped.length} without a valid email address: {sendResult.skipped.join(", ")}</div>}
-        </div>
-      )}
+      {sendResult && !sendResult.needsSetup && (() => {
+        const p = sendResult.progress;
+        const finished = p && (p.status === "done" || p.status === "partial" || p.status === "error");
+        const notSent = [...(sendResult.suppressed || []), ...((p && p.suppressedLate) || [])];
+        const failed = (p && p.failed) || [];
+        return (
+          <div style={{ marginTop: 10, fontSize: 11.5, lineHeight: 1.6 }}>
+            {sendResult.queued > 0 && !finished && (
+              <div style={{ color: C.inkMuted }}>Sending… {p ? p.processed : 0} of {sendResult.queued} processed. This carries on in the background if you leave this page.</div>
+            )}
+            {finished && p.sent > 0 && <div style={{ color: C.green }}>✓ Sent to {p.sent} recipient{p.sent === 1 ? "" : "s"}.</div>}
+            {finished && p.status !== "done" && <div style={{ color: p.status === "error" ? "#E5484D" : C.amber, marginTop: 4 }}>{p.error || "Sending stopped before finishing."} Sent to {p.sent} of {p.total}.</div>}
+            {failed.length > 0 && <div style={{ color: "#E5484D", marginTop: 4 }}>✕ Failed for {failed.length}: {failed.map(f => `${f.email} (${f.reason})`).join("; ")}</div>}
+            {notSent.length > 0 && <div style={{ color: C.inkFaint, marginTop: 4 }}>Not sent to {notSent.length} who unsubscribed or are suppressed: {notSent.join(", ")}</div>}
+            {(sendResult.skipped || []).length > 0 && <div style={{ color: C.inkFaint, marginTop: 4 }}>Skipped {sendResult.skipped.length} without a valid email address: {sendResult.skipped.join(", ")}</div>}
+          </div>
+        );
+      })()}
       {!sendResult && (
         <div style={{ fontSize: 10.5, color: C.inkFaint, marginTop: 8, lineHeight: 1.5 }}>
           Sends a real email to anyone in the list with a valid address (needs an email service connected on the backend — see below if it's not set up yet).

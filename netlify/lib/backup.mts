@@ -12,7 +12,9 @@
 export const BACKUP_STORE = "visocex-backups";
 // Copied in full every day. Session/invite/reset tokens are deliberately not
 // backed up — they're short-lived and restoring them would revive old logins.
-export const DAILY_SOURCES = ["visocex-data", "visocex-tenants", "visocex-report-jobs"];
+// The unsubscribe list is included because losing it would mean emailing people
+// who opted out.
+export const DAILY_SOURCES = ["visocex-data", "visocex-tenants", "visocex-report-jobs", "visocex-suppressions"];
 // Uploaded files are immutable (random UUID keys, never overwritten), so they
 // are copied incrementally instead of every day.
 export const ASSET_SOURCE = "visocex-asset-files";
