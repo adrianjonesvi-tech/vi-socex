@@ -44,6 +44,15 @@ saved in between, the server returns **409 + the current value** and the browser
 `GET /api/data?versions=1` every 20 s (and on focus) and pull in changed sections. Saves without the
 header (old open tabs) are still accepted for backward compatibility.
 
+## Backups
+`backup-daily.mts` (scheduled, 00:00 UTC, logic in `netlify/lib/backup.mts`) copies `visocex-data`,
+`visocex-tenants` and `visocex-report-jobs` into the `visocex-backups` store under
+`daily/<YYYY-MM-DD>/<store>/<key>` (original metadata kept), writes `manifests/<date>`, copies uploaded
+files once to `assets/<key>`, and keeps 30 days. Outcome: `status/last-run` and `status/last-success`
+in that store, plus `[backup]` lines in the function log. Run on demand from Netlify → Logs → Functions
+→ backup-daily → Run now. Optional env var `BACKUP_ALERT_EMAIL` emails on failure.
+These backups live on the same Netlify site — keep periodic off-site copies too.
+
 ## Deploying
 Deployed directly to the Netlify site above (no build step). From the repo root with the Netlify CLI:
 `netlify deploy --prod --site 2020deec-311d-4d09-94e1-fdbaef4e7e1c`
