@@ -24,6 +24,7 @@ async function callClaudeWithWebSearch(system: string, userPrompt: string, maxTo
       tools: [{ type: "web_search_20250305", name: "web_search", max_uses: maxSearches } as any],
     });
     content.push(...message.content);
+    console.log(`market-report round ${attempt + 1}: stop_reason=${message.stop_reason} output_tokens=${message.usage?.output_tokens}`);
     if (message.stop_reason === "max_tokens") {
       throw new Error("The report was too long and got cut off before finishing — try again.");
     }
