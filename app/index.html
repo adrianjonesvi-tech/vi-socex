@@ -3101,7 +3101,12 @@ function MarketInsightsView({ markets, brand, products, updateMarket, setTab, co
         headers: __authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           jobId, marketName: market.name, region: market.region, industry: market.industry,
-          brand: hasBrand ? brand : null, products: hasProducts ? products : null, websiteUrl,
+          // Only the fields the report uses — the full brand/products records
+          // (logos, sources, AI overviews) exceed the background function's
+          // ~256KB request limit and get rejected with 413.
+          brand: hasBrand ? { tone: brand.tone, rules: brand.rules } : null,
+          products: hasProducts ? products.map(p => ({ name: p.name, keyMessages: p.keyMessages })) : null,
+          websiteUrl,
         }),
       });
       // Poll until the background job finishes, checking every few seconds.
