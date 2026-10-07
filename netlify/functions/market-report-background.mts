@@ -27,6 +27,13 @@ async function callClaudeWithWebSearch(system: string, userPrompt: string, maxTo
 }
 
 export default async (req: Request, context: Context) => {
+  // Background functions always answer 202 to the caller, so an unauthorised
+  // request just stops here without running (and paying for) any research.
+  const token = req.headers.get("X-Session-Token");
+  if (!token) return new Response("unauthorized", { status: 401 });
+  const session = await getStore("visocex-sessions").get(token, { type: "json" });
+  if (!session || !session.tenantId) return new Response("unauthorized", { status: 401 });
+
   const jobsStore = getStore("visocex-report-jobs");
   let body: any;
   try {
@@ -49,9 +56,9 @@ export default async (req: Request, context: Context) => {
     const userPrompt = `Market: ${marketName}${region ? `, region: ${region}` : ""}${industry ? `, industry: ${industry}` : ""}.${brandNote}${productsNote}${websiteNote}\n\nProduce the five-section market report now.`;
 
     const report = await callClaudeWithWebSearch(system, userPrompt, 8000);
-    await jobsStore.setJSON(jobId, { status: "done", report, completedAt: Date.now() });
+    await jobsStore.setJSON(jobId, { status: "done", report, tenantId: session.tenantId, completedAt: Date.now() });
   } catch (err: any) {
-    await jobsStore.setJSON(jobId, { status: "error", error: err.message || "Generation failed", completedAt: Date.now() });
+    await jobsStore.setJSON(jobId, { status: "error", error: err.message || "Generation failed", tenantId: session.tenantId, completedAt: Date.now() });
   }
 
   return new Response("ok");

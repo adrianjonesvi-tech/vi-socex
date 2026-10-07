@@ -1,4 +1,5 @@
 import type { Context, Config } from "@netlify/functions";
+import { getStore } from "@netlify/blobs";
 
 // Sends real email via Resend (https://resend.com). Needs a RESEND_KEY
 // environment variable set in the Netlify site — without it, this endpoint
@@ -26,6 +27,13 @@ function isValidEmail(s: string) {
 
 export default async (req: Request, context: Context) => {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+
+  // Only signed-in users can send — otherwise anyone could use this endpoint
+  // to send arbitrary email from our verified sending address.
+  const token = req.headers.get("X-Session-Token");
+  if (!token) return json({ error: "unauthorized" }, 401);
+  const session = await getStore("visocex-sessions").get(token, { type: "json" });
+  if (!session || !session.tenantId) return json({ error: "unauthorized" }, 401);
 
   const apiKey = Netlify.env.get("RESEND_KEY");
   if (!apiKey) {

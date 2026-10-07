@@ -3098,7 +3098,7 @@ function MarketInsightsView({ markets, brand, products, updateMarket, setTab, co
     try {
       await fetch("/api/market-report-background", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: __authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           jobId, marketName: market.name, region: market.region, industry: market.industry,
           brand: hasBrand ? brand : null, products: hasProducts ? products : null, websiteUrl,
@@ -3109,7 +3109,12 @@ function MarketInsightsView({ markets, brand, products, updateMarket, setTab, co
       const maxWaitMs = 10 * 60 * 1000; // 10 minutes
       while (Date.now() - start < maxWaitMs) {
         await new Promise(r => setTimeout(r, 4000));
-        const res = await fetch(`/api/report-status?jobId=${encodeURIComponent(jobId)}`);
+        const res = await fetch(`/api/report-status?jobId=${encodeURIComponent(jobId)}`, { headers: __authHeaders() });
+        if (res.status === 401) {
+          setGenError(prev => ({ ...prev, [market.id]: "Your session has expired — sign out and back in, then try again." }));
+          setGeneratingId(null);
+          return;
+        }
         const job = await res.json();
         if (job.status === "done") {
           if (!job.report || !job.report.trim()) {
@@ -4509,11 +4514,12 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
       const fullMessage = `${message}\n\nTake the survey here: ${shareLink}`;
       const res = await fetch("/api/send-email", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: __authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ recipients: emailCandidates, subject, message: fullMessage }),
       });
       const data = await res.json();
-      if (res.status === 501) setSendResult({ needsSetup: true, message: data.error });
+      if (res.status === 401) setSendResult({ error: "Your session has expired — sign out and back in, then send again." });
+      else if (res.status === 501) setSendResult({ needsSetup: true, message: data.error });
       else setSendResult({ sent: data.sent || [], failed: data.failed || [], skipped: data.skipped || [] });
     } catch (err) {
       setSendResult({ error: "Couldn't reach the email service — check your connection and try again." });
