@@ -10,18 +10,38 @@ import Anthropic from "@anthropic-ai/sdk";
 
 async function callClaudeWithWebSearch(system: string, userPrompt: string, maxTokens: number, maxSearches = 10) {
   const anthropic = new Anthropic();
-  const message = await anthropic.messages.create({
-    model: "claude-sonnet-5",
-    max_tokens: maxTokens,
-    system,
-    messages: [{ role: "user", content: userPrompt }],
-    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: maxSearches } as any],
-  });
-  if (message.stop_reason === "max_tokens") {
-    throw new Error("The report was too long and got cut off before finishing — try again.");
+  const messages: any[] = [{ role: "user", content: userPrompt }];
+  const content: any[] = [];
+  // A long web-search turn can come back with stop_reason "pause_turn", meaning
+  // the report isn't finished yet. Send it back so it carries on, rather than
+  // saving the half-written report as if it were complete.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-5",
+      max_tokens: maxTokens,
+      system,
+      messages,
+      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: maxSearches } as any],
+    });
+    content.push(...message.content);
+    if (message.stop_reason === "max_tokens") {
+      throw new Error("The report was too long and got cut off before finishing — try again.");
+    }
+    if ((message.stop_reason as string) !== "pause_turn") break;
+    if (attempt === 3) throw new Error("The research took too long to finish — try again.");
+    messages.push({ role: "assistant", content: message.content });
   }
-  const textBlocks = message.content.filter((b: any) => b.type === "text");
-  const text = textBlocks.map((b: any) => b.text).join("\n\n").trim();
+  // Web search splits the text into many blocks around each citation, often
+  // mid-sentence, so back-to-back text blocks are joined as-is. Only text on
+  // either side of a search step gets a paragraph break.
+  let text = "";
+  let afterOtherBlock = false;
+  for (const b of content) {
+    if (b.type !== "text") { afterOtherBlock = true; continue; }
+    text += (afterOtherBlock && text ? "\n\n" : "") + b.text;
+    afterOtherBlock = false;
+  }
+  text = text.trim();
   if (!text) throw new Error("The research engine didn't return a report — try again.");
   return text;
 }
@@ -55,7 +75,7 @@ export default async (req: Request, context: Context) => {
     const system = `You are a market research analyst producing a genuinely sourced report for a marketing team. Research using web search and write a clear, well-organised report on the market described, covering exactly these five sections in order: 1) Recent events — real news and announcements in this market from the last few months, with dates. 2) Trends — what's actually shifting: demand, channels, pricing, buyer behaviour, backed by what you found. 3) Competitors — specific named competitors and what they're actually posting, running as ads, or publishing recently, not generic industry commentary. 4) Your website — compare the company's own website (if given) against what's actually landing well in this market right now; if no URL was given, say so plainly instead of fabricating a comparison. 5) Your messaging — checked against the company's actual brand voice and product key messages (if given), noting genuine gaps or alignment, not generic advice. Every claim must come from what you actually found via search — never invent statistics, dates, or competitor activity. Write in clear prose with the five section headings, concise and specific, citing where things came from naturally in the text (e.g. "According to..."). If you can't find good information for a section, say so honestly rather than padding it with generic filler.`;
     const userPrompt = `Market: ${marketName}${region ? `, region: ${region}` : ""}${industry ? `, industry: ${industry}` : ""}.${brandNote}${productsNote}${websiteNote}\n\nProduce the five-section market report now.`;
 
-    const report = await callClaudeWithWebSearch(system, userPrompt, 8000);
+    const report = await callClaudeWithWebSearch(system, userPrompt, 16000);
     await jobsStore.setJSON(jobId, { status: "done", report, tenantId: session.tenantId, completedAt: Date.now() });
   } catch (err: any) {
     await jobsStore.setJSON(jobId, { status: "error", error: err.message || "Generation failed", tenantId: session.tenantId, completedAt: Date.now() });
