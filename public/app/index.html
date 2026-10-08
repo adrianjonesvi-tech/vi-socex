@@ -7027,7 +7027,7 @@ function LeadForm({ draft, setDraft, campaigns, onCancel, onSubmit, isEdit, cont
       </div>
       <Field label="Email"><input type="email" value={draft.email} onChange={e => setDraft({ ...draft, email: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder="priya@example.com" /></Field>
       <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
-        <Field label={`Deal value (${currency || "£"})`}><input type="number" min="0" value={draft.value} onChange={e => setDraft({ ...draft, value: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder="1200" /></Field>
+        <Field label={`Deal value (${currency || "£"})`}><input type="number" min="0" step="1000" value={draft.value} onChange={e => setDraft({ ...draft, value: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder="12000" title="Arrows move in £1,000 steps — type any amount" /></Field>
         <Field label="Stage">
           <select value={draft.stage} onChange={e => setDraft({ ...draft, stage: e.target.value })} style={inputStyle}>
             {LEAD_STAGES.map(s => <option key={s} value={s}>{s}</option>)}
@@ -7051,14 +7051,16 @@ function LeadForm({ draft, setDraft, campaigns, onCancel, onSubmit, isEdit, cont
             {draft.source && !LEAD_SOURCES.includes(draft.source) && <option value={draft.source}>{draft.source}</option>}
           </select>
         </Field>
-        <Field label={/^Show/.test(draft.source) ? "Which show?" : "Source detail (optional)"}>
-          <input value={draft.sourceDetail || ""} onChange={e => setDraft({ ...draft, sourceDetail: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder={/^Show/.test(draft.source) ? "e.g. Lettings Expo 2026" : "e.g. who referred them"} />
-        </Field>
         <Field label="Campaign (optional)">
           <select value={draft.campaignId} onChange={e => setDraft({ ...draft, campaignId: e.target.value })} style={inputStyle}>
             <option value="">None</option>
             {campaigns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
+        </Field>
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <Field label={/^Show/.test(draft.source) ? "Which show?" : "Source detail (optional)"}>
+          <input value={draft.sourceDetail || ""} onChange={e => setDraft({ ...draft, sourceDetail: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder={/^Show/.test(draft.source) ? "e.g. Lettings Expo 2026" : "e.g. who referred them"} />
         </Field>
       </div>
       <div style={{ marginTop: 12 }}>
