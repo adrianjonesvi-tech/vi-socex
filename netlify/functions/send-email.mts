@@ -74,7 +74,7 @@ export default async (req: Request, context: Context) => {
   const suppressed = unique.filter(e => blocked.has(e));
   const toSend = unique.filter(e => !blocked.has(e));
   if (toSend.length === 0) {
-    return json({ queued: 0, skipped, suppressed, error: "Everyone on this list has unsubscribed or is suppressed — nothing was sent." }, 200);
+    return json({ queued: 0, skipped, suppressed, error: "Everyone on this list has unsubscribed, is suppressed, or has no recorded consent basis — nothing was sent." }, 200);
   }
 
   const tenant = session.email ? await getStore("visocex-tenants").get(session.email, { type: "json" }) : null;

@@ -105,7 +105,7 @@ function adStatusColor(s) {
 }
 
 const LEAD_STAGES = ["New", "Contacted", "Qualified", "Proposal", "Won", "Lost"];
-const LEAD_SOURCES = ["Website form", "Demo request", "Newsletter signup", "Referral", "Other"];
+const LEAD_SOURCES = ["Phone call", "Email enquiry", "Show — walking round", "Show — our stand (badge scan)", "Business card", "Website form", "Demo request", "Newsletter signup", "Referral", "Other"];
 function leadStageColor(s) {
   if (s === "Won") return C.green;
   if (s === "Lost") return C.inkFaint;
@@ -534,13 +534,110 @@ function saveLeads(leads) { apiSet("leads", leads); }
 // classification tags double as what used to be separate "email lists".
 const emptyCompanyDraft = { name: "", industry: "", region: "", website: "", notes: "", marketId: "" };
 const MARKETING_STATUSES = ["Subscribed", "Unsubscribed", "Suppressed", "Pending confirmation", "Not eligible"];
-const CONSENT_SOURCES = ["Website form", "Event", "Imported", "Customer relationship", "Manual entry"];
-const CONSENT_BASES = ["Consent", "Legitimate interests", "Existing customer"];
+// "How was this contact obtained?" — stored in consentSource, with the date in
+// consentSourceDate and any detail in consentSourceDetail. Older contacts may
+// hold earlier values (e.g. "Manual entry"); those are still shown as-is.
+const OBTAINED_OPTIONS = ["Phone call", "Email enquiry", "Website form / sign-up", "Event or meeting", "Referral", "Existing customer relationship", "Business card / in person", "Created from lead", "Imported list", "Other"];
+const UNKNOWN_BASIS = "Unknown basis";
+const CONSENT_BASES = [UNKNOWN_BASIS, "Consent (evidenced)", "Legitimate interests", "Existing customer"];
 // A contact with any of these statuses is never a real send target, no matter
 // what tag or sector filter matches them — unsubscribing suppresses future
 // marketing, it never deletes the underlying CRM record.
 const SUPPRESSED_STATUSES = ["Unsubscribed", "Suppressed", "Not eligible"];
-const emptyContactDraft = { name: "", email: "", phone: "", jobTitle: "", companyId: "", tags: [], notes: "", marketingStatus: "Subscribed", consentSource: "Manual entry", consentBasis: "Consent", consentHistory: [] };
+const emptyContactDraft = { name: "", email: "", phone: "", jobTitle: "", companyId: "", tags: [], notes: "", marketingStatus: "Pending confirmation", consentSource: "", consentSourceDate: "", consentSourceDetail: "", consentBasis: UNKNOWN_BASIS, consentEvidence: "", consentHistory: [] };
+
+// A contact's basis only counts once someone has actually chosen it (basisSetAt
+// is stamped then). Contacts saved before this rule existed defaulted to
+// "Consent" without anyone checking, so they read as Unknown basis until
+// reviewed — their stored values are left untouched. "Consent (evidenced)"
+// also needs a note of how they opted in. Keep in step with
+// effectiveBasis() in netlify/lib/email.mts.
+function effectiveBasis(c) {
+  if (!c || !c.basisSetAt) return UNKNOWN_BASIS;
+  if (c.consentBasis === "Consent (evidenced)" && !(c.consentEvidence || "").trim()) return UNKNOWN_BASIS;
+  return CONSENT_BASES.includes(c.consentBasis) ? c.consentBasis : UNKNOWN_BASIS;
+}
+function canMarketTo(c) {
+  return !SUPPRESSED_STATUSES.includes(c.marketingStatus) && effectiveBasis(c) !== UNKNOWN_BASIS;
+}
+// Edit-form draft for an existing contact. The basis starts at its effective
+// value, so an unreviewed contact shows Unknown basis rather than the "Consent"
+// it was saved with by default.
+function contactToDraft(c, companyId) {
+  return {
+    name: c.name, email: c.email || "", phone: c.phone || "", jobTitle: c.jobTitle || "", companyId, tags: c.tags || [], notes: c.notes || "",
+    marketingStatus: c.marketingStatus || "Pending confirmation",
+    consentSource: c.consentSource || "", consentSourceDate: c.consentSourceDate || "", consentSourceDetail: c.consentSourceDetail || "",
+    consentBasis: effectiveBasis(c), consentEvidence: c.consentEvidence || "", consentHistory: c.consentHistory || [],
+  };
+}
+
+// Matching used when a lead creates or links its contact and company.
+function normEmail(s) { return (s || "").trim().toLowerCase(); }
+function normPersonName(s) { return (s || "").trim().toLowerCase().replace(/\s+/g, " "); }
+function normCompanyName(s) {
+  return (s || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\b(ltd|limited)\b/g, " ").replace(/\s+/g, " ").trim();
+}
+function findCompanyByName(companies, name) {
+  const n = normCompanyName(name);
+  return n ? companies.find(c => normCompanyName(c.name) === n) || null : null;
+}
+// Works out what saving a lead would do, without changing anything:
+//   company: { action: "link", record, differs } | { action: "create", name } | null
+//   contact: { action: "link", record, by, differences: [field…] } | { action: "create" } | null
+//   sameNameElsewhere: contacts with the same name that weren't matched (shown as a warning)
+function planLeadLinks(draft, contacts, companies) {
+  const plan = { company: null, contact: null, sameNameElsewhere: [] };
+  const typedCo = (draft.company || "").trim();
+  const chosen = draft.contactId ? contacts.find(c => c.id === draft.contactId) : null;
+  const chosenCo = chosen && chosen.companyId ? companies.find(c => c.id === chosen.companyId) : null;
+  if (chosenCo && (!typedCo || normCompanyName(typedCo) === normCompanyName(chosenCo.name))) {
+    plan.company = { action: "link", record: chosenCo, differs: false };
+  } else if (typedCo) {
+    const co = findCompanyByName(companies, typedCo);
+    plan.company = co ? { action: "link", record: co, differs: co.name.trim() !== typedCo } : { action: "create", name: typedCo };
+  }
+
+  let match = chosen, by = chosen ? "chosen" : "";
+  const email = normEmail(draft.email);
+  if (!match && email) { match = contacts.find(c => normEmail(c.email) === email) || null; by = "email"; }
+  // No email (e.g. a phone call): only the same name at the same existing company counts.
+  if (!match && !email && draft.name.trim() && plan.company && plan.company.action === "link") {
+    match = contacts.find(c => c.companyId === plan.company.record.id && normPersonName(c.name) === normPersonName(draft.name)) || null;
+    by = "name and company";
+  }
+  if (match) {
+    const differences = [];
+    if (draft.name.trim() && normPersonName(match.name) !== normPersonName(draft.name)) differences.push("name");
+    if (email && normEmail(match.email) !== email) differences.push("email");
+    if ((draft.phone || "").trim() && (match.phone || "").trim() !== draft.phone.trim()) differences.push("phone");
+    if ((draft.jobTitle || "").trim() && (match.jobTitle || "").trim() !== draft.jobTitle.trim()) differences.push("job title");
+    if (plan.company && plan.company.action === "link" && match.companyId !== plan.company.record.id) differences.push("company");
+    if (plan.company && plan.company.action === "create") differences.push("company");
+    plan.contact = { action: "link", record: match, by, differences };
+  } else if (draft.name.trim()) {
+    plan.contact = { action: "create" };
+    plan.sameNameElsewhere = contacts.filter(c => normPersonName(c.name) === normPersonName(draft.name));
+  }
+  return plan;
+}
+// Plain-English lines for a plan — "will …" before saving, past tense after.
+function describeLeadPlan(plan, draft, future) {
+  const lines = [];
+  const co = plan.company;
+  if (co && co.action === "create") lines.push(`${future ? "Will create" : "Created"} company "${co.name}".`);
+  if (co && co.action === "link") lines.push(`${future ? "Will link to" : "Linked to"} existing company "${co.record.name}"${co.differs ? ` (you typed "${(draft.company || "").trim()}" — the existing record ${future ? "won't be" : "wasn't"} changed)` : ""}.`);
+  const ct = plan.contact;
+  if (ct && ct.action === "create") {
+    lines.push(`${future ? "Will create" : "Created"} contact "${draft.name.trim()}"${co ? ` at ${co.action === "create" ? co.name : co.record.name}` : ""}, marked Unknown basis — no marketing emails until someone reviews their consent.`);
+  }
+  if (ct && ct.action === "link") {
+    const how = ct.by === "chosen" ? "" : ` (matched by ${ct.by})`;
+    lines.push(`${future ? "Will link to" : "Linked to"} existing contact "${ct.record.name}"${how}${ct.differences.length ? ` — their ${ct.differences.join(", ")} ${ct.differences.length === 1 ? "differs" : "differ"} from what you typed, and the existing record ${future ? "won't be" : "wasn't"} changed` : ""}.`);
+  }
+  if (!ct && !co) lines.push(`Nothing to create — add a company or name.`);
+  return lines;
+}
 async function loadCompanies() { return apiGet("companies", []); }
 function saveCompanies(companies) { apiSet("companies", companies); }
 async function loadContacts() { return apiGet("contacts", []); }
@@ -1146,7 +1243,6 @@ function App({ tenant, onLogout, token, onUpdateTenant }) {
   function updateCaseStudy(id, patch) { setCaseStudies(prev => prev.map(c => c.id === id ? { ...c, ...patch } : c)); }
   function deleteCaseStudy(id) { setCaseStudies(prev => prev.filter(c => c.id !== id)); }
 
-  function addLead(l) { setLeads(prev => [...prev, { ...l, id: uid() }]); }
   function updateLead(id, patch) { setLeads(prev => prev.map(l => l.id === id ? { ...l, ...patch } : l)); }
   function deleteLead(id) { setLeads(prev => prev.filter(l => l.id !== id)); }
   function addCompany(c) { const id = uid(); setCompanies(prev => [...prev, { ...c, id, createdDate: todayISO() }]); return id; }
@@ -1154,8 +1250,13 @@ function App({ tenant, onLogout, token, onUpdateTenant }) {
   function deleteCompany(id) { setCompanies(prev => prev.filter(c => c.id !== id)); setContacts(prev => prev.map(ct => ct.companyId === id ? { ...ct, companyId: "" } : ct)); }
   function addContact(c) {
     const id = uid();
-    const history = c.marketingStatus ? [{ status: c.marketingStatus, date: todayISO() }] : [];
-    setContacts(prev => [...prev, { ...c, id, createdDate: todayISO(), consentHistory: history }]);
+    const today = todayISO();
+    const rec = { ...c, id, createdDate: today };
+    if (rec.consentSource && !rec.consentSourceDate) rec.consentSourceDate = today;
+    // Choosing a basis on the form counts as setting it (see effectiveBasis).
+    if (rec.consentBasis) { rec.basisSetAt = new Date().toISOString(); rec.basisSetBy = tenant.email || ""; }
+    rec.consentHistory = c.marketingStatus ? [{ status: c.marketingStatus, basis: effectiveBasis(rec), date: today }] : [];
+    setContacts(prev => [...prev, rec]);
     return id;
   }
   function updateContact(id, patch) {
@@ -1175,14 +1276,99 @@ function App({ tenant, onLogout, token, onUpdateTenant }) {
         }
       }
     }
+    // The edit form starts from the contact's effective basis, so saving without
+    // touching it changes nothing — older contacts keep their stored values and
+    // stay Unknown basis until someone actually chooses one.
+    let basisChanged = false;
+    if (current && ("consentBasis" in patch || "consentEvidence" in patch)) {
+      const nb = patch.consentBasis !== undefined ? patch.consentBasis : current.consentBasis;
+      const ne = patch.consentEvidence !== undefined ? patch.consentEvidence : (current.consentEvidence || "");
+      if (nb === effectiveBasis(current) && (ne || "") === (current.consentEvidence || "")) {
+        patch = { ...patch };
+        delete patch.consentBasis; delete patch.consentEvidence;
+      } else {
+        basisChanged = true;
+        patch = { ...patch, consentBasis: nb, consentEvidence: ne, basisSetAt: new Date().toISOString(), basisSetBy: tenant.email || "" };
+      }
+    }
     setContacts(prev => prev.map(c => {
       if (c.id !== id) return c;
       const next = { ...c, ...patch };
-      if (patch.marketingStatus && patch.marketingStatus !== c.marketingStatus) {
-        next.consentHistory = [...(c.consentHistory || []), { status: patch.marketingStatus, date: todayISO() }];
+      if ((patch.marketingStatus && patch.marketingStatus !== c.marketingStatus) || basisChanged) {
+        next.consentHistory = [...(c.consentHistory || []), { status: next.marketingStatus, basis: effectiveBasis(next), date: todayISO() }];
       }
       return next;
     }));
+  }
+
+  // Saving a lead also creates or links its company and contact — see
+  // planLeadLinks(). Existing records are linked as they are, never changed.
+  function applyLeadLinks(draft, leadId) {
+    const plan = planLeadLinks(draft, contacts, companies);
+    const today = todayISO();
+    let companyId = "", contactId = "";
+    if (plan.company) {
+      companyId = plan.company.action === "link" ? plan.company.record.id
+        : addCompany({ ...emptyCompanyDraft, name: plan.company.name, createdFromLeadId: leadId });
+    }
+    if (plan.contact && plan.contact.action === "link") contactId = plan.contact.record.id;
+    else if (plan.contact) {
+      const detail = (draft.sourceDetail || "").trim();
+      contactId = addContact({
+        ...emptyContactDraft,
+        // The show or event name becomes a tag, so "everyone we met at X" is a ready-made segment.
+        tags: detail && /^Show/.test(draft.source || "") ? [detail] : [],
+        name: draft.name.trim(), email: (draft.email || "").trim(), phone: (draft.phone || "").trim(), jobTitle: (draft.jobTitle || "").trim(), companyId,
+        consentSource: "Created from lead", consentSourceDate: today, consentSourceDetail: `Lead source: ${draft.source || "not recorded"}${detail ? ` — ${detail}` : ""}`,
+        consentBasis: UNKNOWN_BASIS, createdFromLeadId: leadId,
+      });
+    }
+    return { plan, companyId, contactId };
+  }
+  function addLeadWithLinks(draft) {
+    const id = uid();
+    const { plan, companyId, contactId } = applyLeadLinks(draft, id);
+    setLeads(prev => [...prev, { ...draft, id, contactId, companyId, createdDate: todayISO() }]);
+    return describeLeadPlan(plan, draft, false);
+  }
+  // Edits never create a second contact. choice is what the user picked when
+  // a linked lead's person details changed: "update" (also update the contact,
+  // only offered for a contact this lead created), "leadOnly", or "relink"
+  // (to the other contact the new email matches). "linkNow" links an older,
+  // unlinked lead on request.
+  function updateLeadWithLinks(id, draft, choice) {
+    const lead = leads.find(l => l.id === id);
+    if (!lead) return [];
+    const patch = { ...draft };
+    if (choice === "linkNow") {
+      const { plan, companyId, contactId } = applyLeadLinks(draft, id);
+      updateLead(id, { ...patch, contactId, companyId });
+      return describeLeadPlan(plan, draft, false);
+    }
+    const notes = [];
+    if (normCompanyName(draft.company) !== normCompanyName(lead.company)) {
+      const typed = (draft.company || "").trim();
+      if (!typed) patch.companyId = "";
+      else {
+        const co = findCompanyByName(companies, typed);
+        patch.companyId = co ? co.id : addCompany({ ...emptyCompanyDraft, name: typed, createdFromLeadId: id });
+        notes.push(co ? `Lead linked to existing company "${co.name}".` : `Created company "${typed}" and linked the lead to it.`);
+      }
+    }
+    if (choice === "update" && lead.contactId) {
+      updateContact(lead.contactId, {
+        name: draft.name.trim(), email: (draft.email || "").trim(), phone: (draft.phone || "").trim(), jobTitle: (draft.jobTitle || "").trim(),
+        ...(patch.companyId !== undefined ? { companyId: patch.companyId } : {}),
+      });
+      notes.push("The contact was updated to match.");
+    } else if (choice === "relink") {
+      const other = contacts.find(c => c.id !== lead.contactId && normEmail(c.email) === normEmail(draft.email));
+      if (other) { patch.contactId = other.id; notes.push(`Lead now linked to existing contact "${other.name}" (same email). That contact wasn't changed.`); }
+    } else if (choice === "leadOnly") {
+      notes.push("Only the lead was changed — its contact still has the old details.");
+    }
+    updateLead(id, patch);
+    return notes;
   }
   function deleteContact(id) { setContacts(prev => prev.filter(c => c.id !== id)); setActivities(prev => prev.filter(a => a.contactId !== id)); setTasks(prev => prev.filter(t => t.contactId !== id)); setDocuments(prev => prev.filter(d => d.contactId !== id)); }
   function addActivity(a) { setActivities(prev => [...prev, { ...a, id: uid(), createdDate: todayISO() }]); }
@@ -1302,7 +1488,7 @@ function App({ tenant, onLogout, token, onUpdateTenant }) {
           {tab === "ads" && <AdsView ads={ads} campaigns={campaigns} products={products} personas={personas} brand={brand} addAd={addAd} updateAd={updateAd} deleteAd={deleteAd} currency={companyInfo.currency || "£"} />}
           {tab === "companies" && <CompaniesView companies={companies} contacts={contacts} addCompany={addCompany} updateCompany={updateCompany} deleteCompany={deleteCompany} addContact={addContact} updateContact={updateContact} deleteContact={deleteContact} activities={activities} addActivity={addActivity} deleteActivity={deleteActivity} tasks={tasks} addTask={addTask} updateTask={updateTask} deleteTask={deleteTask} documents={documents} addDocument={addDocument} deleteDocument={deleteDocument} markets={markets} teamMembers={teamMembers} />}
           {tab === "tasks" && <TasksView tasks={tasks} contacts={contacts} companies={companies} updateTask={updateTask} deleteTask={deleteTask} setTab={setTab} teamMembers={teamMembers} />}
-          {tab === "leads" && <LeadsView leads={leads} campaigns={campaigns} addLead={addLead} updateLead={updateLead} deleteLead={deleteLead} currency={companyInfo.currency || "£"} contacts={contacts} companies={companies} token={token} teamMembers={teamMembers} />}
+          {tab === "leads" && <LeadsView leads={leads} campaigns={campaigns} addLeadWithLinks={addLeadWithLinks} updateLeadWithLinks={updateLeadWithLinks} updateLead={updateLead} deleteLead={deleteLead} currency={companyInfo.currency || "£"} contacts={contacts} companies={companies} token={token} teamMembers={teamMembers} />}
           {tab === "insights" && <MarketInsightsView markets={markets} brand={brand} products={products} updateMarket={updateMarket} setTab={setTab} connections={connections} />}
           {tab === "performance" && <PerformanceView posts={posts} updatePost={updatePost} />}
         </main>
@@ -3478,7 +3664,9 @@ function ConnectionsView({ connections, setConnections, setTab, setPendingTopic,
           tagged++;
         }
       } else {
-        addContact({ name, email, phone: "", jobTitle: "", companyId: "", tags: [listName], notes: "", marketingStatus: "Subscribed", consentSource: "Imported", consentBasis: "Consent" });
+        // Nothing on a pasted list says how these people joined it, so they
+        // aren't marked as consented — Unknown basis until someone reviews them.
+        addContact({ ...emptyContactDraft, name, email, tags: [listName], consentSource: "Imported list", consentSourceDetail: `Email list "${listName}"`, consentBasis: UNKNOWN_BASIS });
         created++;
       }
     });
@@ -4554,7 +4742,7 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
     return co ? co.industry : "";
   }
   function matchesFilters(c) {
-    if (SUPPRESSED_STATUSES.includes(c.marketingStatus)) return false;
+    if (!canMarketTo(c)) return false;
     if (audienceRef && !(c.tags || []).includes(audienceRef)) return false;
     if (sectorFilter && contactSector(c) !== sectorFilter) return false;
     return true;
@@ -4705,7 +4893,7 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
                   {allContacts.filter(matchesFilters).length} matching contact{allContacts.filter(matchesFilters).length === 1 ? "" : "s"}
                 </div>
               )}
-              <div style={{ fontSize: 10.5, color: C.inkFaint, marginTop: 6 }}>Pulled live from Companies & Contacts — sector comes from each contact's linked company, so healthcare content never reaches a manufacturing contact and vice versa. Combine both filters for tighter targeting. Unsubscribed and suppressed contacts are always excluded, regardless of these filters.</div>
+              <div style={{ fontSize: 10.5, color: C.inkFaint, marginTop: 6 }}>Pulled live from Companies & Contacts — sector comes from each contact's linked company, so healthcare content never reaches a manufacturing contact and vice versa. Combine both filters for tighter targeting. Unsubscribed and suppressed contacts, and anyone whose consent basis is still Unknown, are always excluded, regardless of these filters.</div>
             </div>
           ) : (
             <div style={{ fontSize: 11.5, color: C.inkFaint }}>No tags or sectors yet — add tags to contacts, or an industry to their company, under Companies to create a sendable segment.</div>
@@ -4776,7 +4964,7 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
             {finished && p.sent > 0 && <div style={{ color: C.green }}>✓ Sent to {p.sent} recipient{p.sent === 1 ? "" : "s"}.</div>}
             {finished && p.status !== "done" && <div style={{ color: p.status === "error" ? "#E5484D" : C.amber, marginTop: 4 }}>{p.error || "Sending stopped before finishing."} Sent to {p.sent} of {p.total}.</div>}
             {failed.length > 0 && <div style={{ color: "#E5484D", marginTop: 4 }}>✕ Failed for {failed.length}: {failed.map(f => `${f.email} (${f.reason})`).join("; ")}</div>}
-            {notSent.length > 0 && <div style={{ color: C.inkFaint, marginTop: 4 }}>Not sent to {notSent.length} who unsubscribed or are suppressed: {notSent.join(", ")}</div>}
+            {notSent.length > 0 && <div style={{ color: C.inkFaint, marginTop: 4 }}>Not sent to {notSent.length} who unsubscribed, are suppressed, or have no recorded consent basis: {notSent.join(", ")}</div>}
             {(sendResult.skipped || []).length > 0 && <div style={{ color: C.inkFaint, marginTop: 4 }}>Skipped {sendResult.skipped.length} without a valid email address: {sendResult.skipped.join(", ")}</div>}
           </div>
         );
@@ -6730,7 +6918,7 @@ function AdsView({ ads, campaigns, products, personas, brand, addAd, updateAd, d
   );
 }
 
-const emptyLeadDraft = { name: "", company: "", email: "", value: "", stage: "New", source: "Website form", campaignId: "", notes: "", ownerEmail: "", contactId: "", documents: [] };
+const emptyLeadDraft = { name: "", company: "", email: "", phone: "", jobTitle: "", value: "", stage: "New", source: "Website form", sourceDetail: "", campaignId: "", notes: "", ownerEmail: "", contactId: "", documents: [] };
 
 function mockParseEmail(text) {
   const emailMatch = text.match(/[\w.+-]+@[\w-]+\.[\w.-]+/);
@@ -6757,7 +6945,7 @@ function mockParseEmail(text) {
   return { name, email, company };
 }
 
-function LeadForm({ draft, setDraft, campaigns, onCancel, onSubmit, isEdit, contacts, companies, currency, teamMembers }) {
+function LeadForm({ draft, setDraft, campaigns, onCancel, onSubmit, isEdit, contacts, companies, currency, teamMembers, linkedContact, linkNow, setLinkNow, editChoices, onChooseEdit }) {
   const initialDraftRef = React.useRef(draft);
   useUnsavedGuard(JSON.stringify(draft) !== JSON.stringify(initialDraftRef.current));
   const [emailText, setEmailText] = useState("");
@@ -6833,6 +7021,10 @@ function LeadForm({ draft, setDraft, campaigns, onCancel, onSubmit, isEdit, cont
         <Field label="Name"><input value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder="e.g. Priya Shah" /></Field>
         <Field label="Company"><input value={draft.company} onChange={e => setDraft({ ...draft, company: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder="e.g. Northfield Retail Group" /></Field>
       </div>
+      <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
+        <Field label="Job title"><input value={draft.jobTitle || ""} onChange={e => setDraft({ ...draft, jobTitle: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder="e.g. Operations Director" /></Field>
+        <Field label="Phone"><input value={draft.phone || ""} onChange={e => setDraft({ ...draft, phone: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder="e.g. 024 7652 0220" /></Field>
+      </div>
       <Field label="Email"><input type="email" value={draft.email} onChange={e => setDraft({ ...draft, email: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder="priya@example.com" /></Field>
       <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
         <Field label={`Deal value (${currency || "£"})`}><input type="number" min="0" value={draft.value} onChange={e => setDraft({ ...draft, value: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder="1200" /></Field>
@@ -6856,7 +7048,11 @@ function LeadForm({ draft, setDraft, campaigns, onCancel, onSubmit, isEdit, cont
         <Field label="Source">
           <select value={draft.source} onChange={e => setDraft({ ...draft, source: e.target.value })} style={inputStyle}>
             {LEAD_SOURCES.map(s => <option key={s} value={s}>{s}</option>)}
+            {draft.source && !LEAD_SOURCES.includes(draft.source) && <option value={draft.source}>{draft.source}</option>}
           </select>
+        </Field>
+        <Field label={/^Show/.test(draft.source) ? "Which show?" : "Source detail (optional)"}>
+          <input value={draft.sourceDetail || ""} onChange={e => setDraft({ ...draft, sourceDetail: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder={/^Show/.test(draft.source) ? "e.g. Lettings Expo 2026" : "e.g. who referred them"} />
         </Field>
         <Field label="Campaign (optional)">
           <select value={draft.campaignId} onChange={e => setDraft({ ...draft, campaignId: e.target.value })} style={inputStyle}>
@@ -6868,8 +7064,53 @@ function LeadForm({ draft, setDraft, campaigns, onCancel, onSubmit, isEdit, cont
       <div style={{ marginTop: 12 }}>
         <Field label="Notes"><textarea value={draft.notes} onChange={e => setDraft({ ...draft, notes: e.target.value })} rows={2} style={{ ...inputStyle, width: "100%", resize: "vertical" }} placeholder="Optional context…" /></Field>
       </div>
+
+      {(() => {
+        // What saving will do to Companies & Contacts.
+        const box = { marginTop: 16, background: C.raised, border: `1px solid ${C.border}`, borderRadius: 8, padding: 12, fontSize: 12, color: C.inkMuted, lineHeight: 1.5 };
+        const title = { fontSize: 10.5, fontWeight: 700, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 };
+        if (isEdit && linkedContact) {
+          const co = linkedContact.companyId ? companies.find(c => c.id === linkedContact.companyId) : null;
+          return <div style={box}><div style={title}>Companies & Contacts</div>Linked to contact "{linkedContact.name}"{co ? ` at ${co.name}` : ""}. Changing the person's details here asks you before anything else changes — it never creates a second contact.</div>;
+        }
+        const showPlan = !isEdit || linkNow || draft.contactId;
+        const plan = showPlan && draft.name.trim() ? planLeadLinks(draft, contacts, companies) : null;
+        return (
+          <div style={box}>
+            <div style={title}>Companies & Contacts</div>
+            {isEdit && (
+              <label style={{ display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer", marginBottom: plan ? 8 : 0 }}>
+                <input type="checkbox" checked={!!linkNow} onChange={e => setLinkNow(e.target.checked)} style={{ marginTop: 2 }} />
+                <span>This lead isn't linked to a contact yet. Create or link its contact and company when I save.</span>
+              </label>
+            )}
+            {!plan && !isEdit && <div>Enter a name — saving will create or link the contact and company.</div>}
+            {plan && describeLeadPlan(plan, draft, true).map((line, i) => <div key={i}>• {line}</div>)}
+            {plan && plan.sameNameElsewhere.length > 0 && (
+              <div style={{ color: C.amber, marginTop: 6 }}>
+                There's already a contact called {plan.sameNameElsewhere.map(c => { const co = companies.find(x => x.id === c.companyId); return `"${c.name}"${co ? ` at ${co.name}` : ""}`; }).join(", ")}. If it's the same person, pick them under "Link to an existing contact" at the top instead.
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {editChoices && (
+        <div style={{ marginTop: 16, background: `${C.amber}14`, border: `1px solid ${C.amber}`, borderRadius: 8, padding: 12 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 8 }}>You changed this person's details. What should happen to the linked contact?</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {editChoices.map(o => (
+              <button key={o.id} onClick={() => onChooseEdit(o.id)} style={{ textAlign: "left", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7, padding: "8px 12px", cursor: "pointer", color: C.ink }}>
+                <div style={{ fontSize: 12.5, fontWeight: 600 }}>{o.label}</div>
+                <div style={{ fontSize: 11, color: C.inkFaint, marginTop: 2 }}>{o.detail}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
-        <button onClick={onSubmit} style={{ background: C.rose, color: "#fff", border: "none", padding: "9px 18px", borderRadius: 7, fontSize: 14, fontWeight: 600, cursor: "pointer" }}>{isEdit ? "Save changes" : "Create lead"}</button>
+        {!editChoices && <button onClick={onSubmit} style={{ background: C.rose, color: "#fff", border: "none", padding: "9px 18px", borderRadius: 7, fontSize: 14, fontWeight: 600, cursor: "pointer" }}>{isEdit ? "Save changes" : "Create lead"}</button>}
         <button onClick={onCancel} style={{ background: "none", border: `1px solid ${C.border}`, padding: "9px 18px", borderRadius: 7, fontSize: 14, cursor: "pointer", color: C.ink }}>Cancel</button>
       </div>
     </div>
@@ -7007,30 +7248,45 @@ function ContactForm({ draft, setDraft, onCancel, onSubmit, isEdit, companies })
         </div>
       </div>
       <div style={{ marginBottom: 8, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, padding: 10 }}>
-        <div style={{ fontSize: 10.5, fontWeight: 700, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>Marketing consent</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
-          <select value={draft.marketingStatus || "Subscribed"} onChange={e => setDraft({ ...draft, marketingStatus: e.target.value })} style={{ ...inputStyle, fontSize: 11.5, padding: "6px 8px" }}>
+        <div style={{ fontSize: 10.5, fontWeight: 700, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>How was this contact obtained?{!isEdit && <span style={{ color: C.rose }}> *</span>}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 6, marginBottom: 6 }}>
+          <select value={draft.consentSource || ""} onChange={e => setDraft({ ...draft, consentSource: e.target.value })} style={{ ...inputStyle, fontSize: 11.5, padding: "6px 8px", borderColor: !isEdit && !draft.consentSource ? C.rose : undefined }}>
+            <option value="">Choose…</option>
+            {OBTAINED_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+            {draft.consentSource && !OBTAINED_OPTIONS.includes(draft.consentSource) && <option value={draft.consentSource}>{draft.consentSource} (older record)</option>}
+          </select>
+          <input type="date" value={draft.consentSourceDate || todayISO()} onChange={e => setDraft({ ...draft, consentSourceDate: e.target.value })} style={{ ...inputStyle, fontSize: 11.5, padding: "6px 8px" }} title="Date obtained" />
+        </div>
+        <input value={draft.consentSourceDetail || ""} onChange={e => setDraft({ ...draft, consentSourceDetail: e.target.value })} style={{ ...inputStyle, width: "100%", fontSize: 11.5, padding: "6px 8px", marginBottom: 10 }} placeholder="Detail (optional) — e.g. which event, who referred them" />
+        <div style={{ fontSize: 10.5, fontWeight: 700, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>Marketing</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+          <select value={draft.marketingStatus || "Pending confirmation"} onChange={e => setDraft({ ...draft, marketingStatus: e.target.value })} style={{ ...inputStyle, fontSize: 11.5, padding: "6px 8px" }} title="Marketing status">
             {MARKETING_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
-          <select value={draft.consentSource || "Manual entry"} onChange={e => setDraft({ ...draft, consentSource: e.target.value })} style={{ ...inputStyle, fontSize: 11.5, padding: "6px 8px" }}>
-            {CONSENT_SOURCES.map(s => <option key={s} value={s}>{s}</option>)}
-          </select>
-          <select value={draft.consentBasis || "Consent"} onChange={e => setDraft({ ...draft, consentBasis: e.target.value })} style={{ ...inputStyle, fontSize: 11.5, padding: "6px 8px" }}>
+          <select value={draft.consentBasis || UNKNOWN_BASIS} onChange={e => setDraft({ ...draft, consentBasis: e.target.value })} style={{ ...inputStyle, fontSize: 11.5, padding: "6px 8px" }} title="Lawful basis for marketing">
             {CONSENT_BASES.map(b => <option key={b} value={b}>{b}</option>)}
           </select>
         </div>
-        {SUPPRESSED_STATUSES.includes(draft.marketingStatus) && (
-          <div style={{ fontSize: 10.5, color: C.amber, marginTop: 6, lineHeight: 1.4 }}>This contact will be excluded from every real send, regardless of tags or sector — their record stays, only marketing to them stops.</div>
+        {draft.consentBasis === "Consent (evidenced)" && (
+          <input value={draft.consentEvidence || ""} onChange={e => setDraft({ ...draft, consentEvidence: e.target.value })} style={{ ...inputStyle, width: "100%", fontSize: 11.5, padding: "6px 8px", marginTop: 6, borderColor: (draft.consentEvidence || "").trim() ? undefined : C.rose }} placeholder="Record of how they opted in (required) — e.g. ticked newsletter box on website form, 3 Oct 2026" />
         )}
+        {SUPPRESSED_STATUSES.includes(draft.marketingStatus) ? (
+          <div style={{ fontSize: 10.5, color: C.amber, marginTop: 6, lineHeight: 1.4 }}>This contact will be excluded from every real send, regardless of tags or sector — their record stays, only marketing to them stops.</div>
+        ) : (draft.consentBasis || UNKNOWN_BASIS) === UNKNOWN_BASIS ? (
+          <div style={{ fontSize: 10.5, color: C.amber, marginTop: 6, lineHeight: 1.4 }}>Unknown basis — this contact won't receive marketing emails until a basis is chosen.</div>
+        ) : null}
         {draft.consentHistory && draft.consentHistory.length > 0 && (
           <div style={{ fontSize: 10, color: C.inkFaint, marginTop: 6 }}>
-            History: {draft.consentHistory.map(h => `${h.status} (${formatDate(h.date)})`).join(" → ")}
+            History: {draft.consentHistory.map(h => `${h.status}${h.basis ? ` · ${h.basis}` : ""} (${formatDate(h.date)})`).join(" → ")}
           </div>
         )}
       </div>
       <textarea value={draft.notes} onChange={e => setDraft({ ...draft, notes: e.target.value })} rows={2} style={{ ...inputStyle, width: "100%", fontSize: 12, resize: "vertical", marginBottom: 10 }} placeholder="Notes (optional)" />
       <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={onSubmit} disabled={!draft.name.trim()} style={{ background: C.rose, color: "#fff", border: "none", padding: "7px 14px", borderRadius: 6, fontSize: 12.5, fontWeight: 600, cursor: draft.name.trim() ? "pointer" : "default", opacity: draft.name.trim() ? 1 : 0.5 }}>{isEdit ? "Save changes" : "Save contact"}</button>
+        {(() => {
+          const ok = draft.name.trim() && (isEdit || draft.consentSource) && (draft.consentBasis !== "Consent (evidenced)" || (draft.consentEvidence || "").trim());
+          return <button onClick={onSubmit} disabled={!ok} title={ok ? "" : "Name, how they were obtained, and (for evidenced consent) the opt-in record are required"} style={{ background: C.rose, color: "#fff", border: "none", padding: "7px 14px", borderRadius: 6, fontSize: 12.5, fontWeight: 600, cursor: ok ? "pointer" : "default", opacity: ok ? 1 : 0.5 }}>{isEdit ? "Save changes" : "Save contact"}</button>;
+        })()}
         <button onClick={onCancel} style={{ background: "none", border: `1px solid ${C.border}`, color: C.inkMuted, padding: "7px 14px", borderRadius: 6, fontSize: 12.5, cursor: "pointer" }}>Cancel</button>
       </div>
     </div>
@@ -7200,6 +7456,9 @@ function ContactRow({ contact, onEdit, onDelete, activities, onAddActivity, onDe
             {SUPPRESSED_STATUSES.includes(contact.marketingStatus) && (
               <span style={{ fontSize: 9.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3, color: C.amber, border: `1px solid ${C.amber}`, borderRadius: 4, padding: "1px 5px" }}>{contact.marketingStatus}</span>
             )}
+            {!SUPPRESSED_STATUSES.includes(contact.marketingStatus) && effectiveBasis(contact) === UNKNOWN_BASIS && (
+              <span title="No marketing emails until a consent basis is chosen" style={{ fontSize: 9.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3, color: C.inkFaint, border: `1px solid ${C.border}`, borderRadius: 4, padding: "1px 5px" }}>Unknown basis</span>
+            )}
             {engagement && engagement.score > 0 && (
               <span title={`Engagement score: ${engagement.score}`} style={{ fontSize: 9.5, fontWeight: 700, color: engagement.color, border: `1px solid ${engagement.color}`, borderRadius: 4, padding: "1px 5px" }}>{engagement.label} · {engagement.score}</span>
             )}
@@ -7256,7 +7515,7 @@ function CompanyCard({ company, contacts, onUpdateCompany, onDeleteCompany, onAd
 
   function saveCompany() { onUpdateCompany(company.id, companyDraft); setEditingCompany(false); }
   function openNewContact() { setContactDraft({ ...emptyContactDraft, companyId: company.id }); setEditingContactId(null); setShowContactForm(true); }
-  function openEditContact(c) { setContactDraft({ name: c.name, email: c.email, phone: c.phone || "", jobTitle: c.jobTitle || "", companyId: company.id, tags: c.tags || [], notes: c.notes || "", marketingStatus: c.marketingStatus || "Subscribed", consentSource: c.consentSource || "Manual entry", consentBasis: c.consentBasis || "Consent", consentHistory: c.consentHistory || [] }); setEditingContactId(c.id); setShowContactForm(true); }
+  function openEditContact(c) { setContactDraft(contactToDraft(c, company.id)); setEditingContactId(c.id); setShowContactForm(true); }
   function submitContact() {
     if (editingContactId) onUpdateContact(editingContactId, contactDraft); else onAddContact(contactDraft);
     setShowContactForm(false);
@@ -7551,6 +7810,69 @@ function TeamView({ teamMembers, token, tenant, onRefresh, onUpdateTenant }) {
   );
 }
 
+// Contacts who can't be emailed until someone records a lawful basis: older
+// contacts saved before the rule (they defaulted to "Consent" unchecked) and
+// new ones left on Unknown basis. Nothing here changes until a row is saved.
+function ConsentReviewPanel({ contacts, companies, updateContact }) {
+  const [open, setOpen] = useState(false);
+  const [edits, setEdits] = useState({});
+  const pending = contacts.filter(c => !SUPPRESSED_STATUSES.includes(c.marketingStatus) && effectiveBasis(c) === UNKNOWN_BASIS);
+  if (pending.length === 0) return null;
+  function edit(id, patch) { setEdits(prev => ({ ...prev, [id]: { ...(prev[id] || {}), ...patch } })); }
+  function canSave(e) { return e && e.basis && e.basis !== UNKNOWN_BASIS && (e.basis !== "Consent (evidenced)" || (e.evidence || "").trim()); }
+  function save(c) {
+    const e = edits[c.id];
+    if (!canSave(e)) return;
+    updateContact(c.id, {
+      consentBasis: e.basis, consentEvidence: e.basis === "Consent (evidenced)" ? e.evidence.trim() : "",
+      ...(e.source ? { consentSource: e.source } : {}),
+    });
+    setEdits(prev => { const n = { ...prev }; delete n[c.id]; return n; });
+  }
+  const small = { ...inputStyle, fontSize: 11.5, padding: "5px 8px" };
+  return (
+    <div style={{ background: `${C.amber}10`, border: `1px solid ${C.amber}`, borderRadius: 10, padding: "12px 16px", marginBottom: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+        <div style={{ fontSize: 12.5, color: C.inkMuted }}>
+          <strong style={{ color: C.ink }}>{pending.length} contact{pending.length === 1 ? "" : "s"}</strong> can't receive marketing emails yet — there's no recorded basis for contacting them.
+        </div>
+        <button onClick={() => setOpen(!open)} style={{ background: "none", border: `1px solid ${C.amber}`, color: C.amber, padding: "5px 12px", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" }}>{open ? "Hide" : "Review"}</button>
+      </div>
+      {open && (
+        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ fontSize: 11, color: C.inkFaint, lineHeight: 1.5 }}>Choose "Consent (evidenced)" only where you have a record of how they opted in, and note it. Leave anyone you're unsure about — they simply stay out of marketing sends.</div>
+          {pending.map(c => {
+            const e = edits[c.id] || {};
+            const co = c.companyId ? companies.find(x => x.id === c.companyId) : null;
+            const recorded = [c.marketingStatus, c.consentBasis && !c.basisSetAt ? `${c.consentBasis} (default, not checked)` : null, c.consentSource, c.createdDate && `added ${formatDate(c.createdDate)}`].filter(Boolean).join(" · ");
+            return (
+              <div key={c.id} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ fontSize: 12.5, fontWeight: 600 }}>{c.name}{co ? <span style={{ fontWeight: 400, color: C.inkFaint }}> — {co.name}</span> : null}</div>
+                <div style={{ fontSize: 11, color: C.inkFaint, marginTop: 2 }}>{c.email || "no email"}{recorded ? ` · recorded as: ${recorded}` : ""}</div>
+                <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                  {(!c.consentSource || !OBTAINED_OPTIONS.includes(c.consentSource)) && (
+                    <select value={e.source || ""} onChange={ev => edit(c.id, { source: ev.target.value })} style={small}>
+                      <option value="">How obtained? (optional)</option>
+                      {OBTAINED_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  )}
+                  <select value={e.basis || UNKNOWN_BASIS} onChange={ev => edit(c.id, { basis: ev.target.value })} style={small}>
+                    {CONSENT_BASES.map(b => <option key={b} value={b}>{b}</option>)}
+                  </select>
+                  {e.basis === "Consent (evidenced)" && (
+                    <input value={e.evidence || ""} onChange={ev => edit(c.id, { evidence: ev.target.value })} style={{ ...small, flex: 1, minWidth: 200 }} placeholder="Record of how they opted in (required)" />
+                  )}
+                  <button onClick={() => save(c)} disabled={!canSave(e)} style={{ background: C.rose, color: "#fff", border: "none", padding: "5px 12px", borderRadius: 6, fontSize: 11.5, fontWeight: 600, cursor: canSave(e) ? "pointer" : "default", opacity: canSave(e) ? 1 : 0.5 }}>Save</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CompaniesView({ companies, contacts, addCompany, updateCompany, deleteCompany, addContact, updateContact, deleteContact, activities, addActivity, deleteActivity, tasks, addTask, updateTask, deleteTask, documents, addDocument, deleteDocument, markets, teamMembers }) {
   const [showForm, setShowForm] = useState(false);
   const [draft, setDraft] = useState(emptyCompanyDraft);
@@ -7582,6 +7904,7 @@ function CompaniesView({ companies, contacts, addCompany, updateCompany, deleteC
         </button>
       </div>
       <PageIntro>Companies and the people within them — the accounts and contacts your leads, activity, and communications are really about, instead of a flat list of names.</PageIntro>
+      <ConsentReviewPanel contacts={contacts} companies={companies} updateContact={updateContact} />
 
       {showForm && (
         <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: 16, marginBottom: 20, maxWidth: 640 }}>
@@ -7625,7 +7948,7 @@ function CompaniesView({ companies, contacts, addCompany, updateCompany, deleteC
         <div style={{ fontSize: 12, color: C.inkFaint, marginBottom: 12 }}>People not yet linked to a company.</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {unassignedContacts.map(c => (
-            <ContactRow key={c.id} contact={c} onEdit={() => { setUnassignedDraft({ name: c.name, email: c.email, phone: c.phone || "", jobTitle: c.jobTitle || "", companyId: "", tags: c.tags || [], notes: c.notes || "", marketingStatus: c.marketingStatus || "Subscribed", consentSource: c.consentSource || "Manual entry", consentBasis: c.consentBasis || "Consent", consentHistory: c.consentHistory || [] }); setShowUnassignedForm(c.id); }} onDelete={() => deleteContact(c.id)} activities={activities} onAddActivity={addActivity} onDeleteActivity={deleteActivity} tasks={tasks} onAddTask={addTask} onUpdateTask={updateTask} onDeleteTask={deleteTask} documents={documents} onAddDocument={addDocument} onDeleteDocument={deleteDocument} teamMembers={teamMembers} />
+            <ContactRow key={c.id} contact={c} onEdit={() => { setUnassignedDraft(contactToDraft(c, "")); setShowUnassignedForm(c.id); }} onDelete={() => deleteContact(c.id)} activities={activities} onAddActivity={addActivity} onDeleteActivity={deleteActivity} tasks={tasks} onAddTask={addTask} onUpdateTask={updateTask} onDeleteTask={deleteTask} documents={documents} onAddDocument={addDocument} onDeleteDocument={deleteDocument} teamMembers={teamMembers} />
           ))}
         </div>
         {showUnassignedForm && (
@@ -7706,17 +8029,40 @@ function TasksView({ tasks, contacts, companies, updateTask, deleteTask, setTab,
   );
 }
 
-function LeadsView({ leads, campaigns, addLead, updateLead, deleteLead, currency, contacts, companies, token, teamMembers }) {
+function LeadsView({ leads, campaigns, addLeadWithLinks, updateLeadWithLinks, updateLead, deleteLead, currency, contacts, companies, token, teamMembers }) {
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [draft, setDraft] = useState(emptyLeadDraft);
+  const [linkNow, setLinkNow] = useState(false);
+  const [editChoices, setEditChoices] = useState(null);
+  const [notice, setNotice] = useState(null);
 
-  function openNew() { setDraft(emptyLeadDraft); setEditingId(null); setShowForm(true); }
-  function openEdit(l) { setDraft({ name: l.name, company: l.company, email: l.email, value: l.value, stage: l.stage, source: l.source, campaignId: l.campaignId || "", notes: l.notes || "" }); setEditingId(l.id); setShowForm(true); }
+  function openNew() { setDraft(emptyLeadDraft); setEditingId(null); setLinkNow(false); setEditChoices(null); setShowForm(true); }
+  function openEdit(l) {
+    setDraft({ name: l.name || "", company: l.company || "", email: l.email || "", phone: l.phone || "", jobTitle: l.jobTitle || "", value: l.value, stage: l.stage, source: l.source, sourceDetail: l.sourceDetail || "", campaignId: l.campaignId || "", notes: l.notes || "", ownerEmail: l.ownerEmail || "", contactId: l.contactId || "" });
+    setEditingId(l.id); setLinkNow(false); setEditChoices(null); setShowForm(true);
+  }
+  const editingLead = editingId ? leads.find(l => l.id === editingId) : null;
+  const linkedContact = editingLead && editingLead.contactId ? contacts.find(c => c.id === editingLead.contactId) || null : null;
+  function finish(lines) { setNotice(lines && lines.length ? lines : null); setEditChoices(null); setShowForm(false); }
   function submit() {
     if (!draft.name.trim()) return;
-    if (editingId) updateLead(editingId, draft); else addLead({ ...draft, createdDate: todayISO() });
-    setShowForm(false);
+    if (!editingId) return finish(addLeadWithLinks(draft));
+    const lead = editingLead;
+    // An older lead with no contact only gets one when asked (tick box or picking a contact).
+    if (!linkedContact) return finish(updateLeadWithLinks(editingId, draft, (linkNow || draft.contactId) ? "linkNow" : null));
+    if (draft.contactId && draft.contactId !== lead.contactId) return finish(updateLeadWithLinks(editingId, draft, null));
+    const personChanged = normPersonName(draft.name) !== normPersonName(lead.name) || normEmail(draft.email) !== normEmail(lead.email)
+      || (draft.phone || "").trim() !== (lead.phone || "").trim() || (draft.jobTitle || "").trim() !== (lead.jobTitle || "").trim()
+      || normCompanyName(draft.company) !== normCompanyName(lead.company);
+    if (!personChanged) return finish(updateLeadWithLinks(editingId, draft, null));
+    // Person details changed on a linked lead: ask, never create a second contact.
+    const other = normEmail(draft.email) && contacts.find(c => c.id !== linkedContact.id && normEmail(c.email) === normEmail(draft.email));
+    const options = [];
+    if (other) options.push({ id: "relink", label: `Link this lead to "${other.name}" instead`, detail: `That existing contact already has ${draft.email.trim()}. It won't be changed.` });
+    else if (linkedContact.createdFromLeadId === lead.id) options.push({ id: "update", label: `Update the contact "${linkedContact.name}" too`, detail: "For fixing a typo — this contact was created from this lead." });
+    options.push({ id: "leadOnly", label: "Change the lead only", detail: `"${linkedContact.name}" keeps its current details.` });
+    setEditChoices(options);
   }
   function advance(lead) {
     const idx = LEAD_STAGES.indexOf(lead.stage);
@@ -7755,7 +8101,15 @@ function LeadsView({ leads, campaigns, addLead, updateLead, deleteLead, currency
         </div>
       )}
 
-      {showForm && <LeadForm draft={draft} setDraft={setDraft} campaigns={campaigns} onCancel={() => setShowForm(false)} onSubmit={submit} isEdit={!!editingId} contacts={contacts} companies={companies} currency={currency} teamMembers={teamMembers} />}
+      {notice && !showForm && (
+        <div style={{ maxWidth: 560, background: `${C.teal}14`, border: `1px solid ${C.teal}`, borderRadius: 8, padding: "10px 14px", marginBottom: 16, fontSize: 12.5, color: C.inkMuted, display: "flex", justifyContent: "space-between", gap: 10 }}>
+          <div>{notice.map((line, i) => <div key={i} style={{ marginTop: i ? 4 : 0 }}>{line}</div>)}</div>
+          <button onClick={() => setNotice(null)} style={{ background: "none", border: "none", color: C.inkFaint, cursor: "pointer", alignSelf: "flex-start" }}><Icon name="x" size={13} /></button>
+        </div>
+      )}
+
+      {showForm && <LeadForm draft={draft} setDraft={d => { setEditChoices(null); setDraft(d); }} campaigns={campaigns} onCancel={() => { setEditChoices(null); setShowForm(false); }} onSubmit={submit} isEdit={!!editingId} contacts={contacts} companies={companies} currency={currency} teamMembers={teamMembers}
+        linkedContact={linkedContact} linkNow={linkNow} setLinkNow={setLinkNow} editChoices={editChoices} onChooseEdit={id => finish(updateLeadWithLinks(editingId, draft, id))} />}
 
       {leads.length > 0 && (
         <div style={{ display: "flex", gap: 14, overflowX: "auto", paddingBottom: 8 }}>

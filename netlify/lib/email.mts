@@ -13,8 +13,17 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 export const SUPPRESSION_STORE = "visocex-suppressions";
 export const SEND_JOBS_STORE = "visocex-send-jobs";
-// Keep in step with SUPPRESSED_STATUSES in public/app/index.html.
+// Keep in step with SUPPRESSED_STATUSES and effectiveBasis() in public/app/index.html.
 export const SUPPRESSED_STATUSES = ["Unsubscribed", "Suppressed", "Not eligible"];
+const BASES = ["Unknown basis", "Consent (evidenced)", "Legitimate interests", "Existing customer"];
+
+// A basis only counts once someone has chosen it (basisSetAt). Older contacts
+// defaulted to "Consent" unchecked, so they read as Unknown basis until reviewed.
+export function effectiveBasis(c: any) {
+  if (!c || !c.basisSetAt) return "Unknown basis";
+  if (c.consentBasis === "Consent (evidenced)" && !String(c.consentEvidence || "").trim()) return "Unknown basis";
+  return BASES.includes(c.consentBasis) ? c.consentBasis : "Unknown basis";
+}
 export const MAX_RECIPIENTS = 5000;
 
 type StoreFactory = (name: any) => any;
@@ -37,13 +46,14 @@ export async function listSuppressions(getStore: StoreFactory, tenantId: string)
 }
 
 // Every address this workspace must not email: anyone who used an unsubscribe
-// link, plus contacts whose marketing status is set to a suppressed one.
+// link, plus contacts whose marketing status is suppressed or whose consent
+// basis is still Unknown.
 export async function suppressedEmails(getStore: StoreFactory, tenantId: string): Promise<Set<string>> {
   const out = new Set(await listSuppressions(getStore, tenantId));
   const contacts = await getStore({ name: "visocex-data", consistency: "strong" }).get(`${tenantId}__contacts`, { type: "json" });
   if (Array.isArray(contacts)) {
     for (const c of contacts) {
-      if (c && c.email && SUPPRESSED_STATUSES.includes(c.marketingStatus)) out.add(normEmail(c.email));
+      if (c && c.email && (SUPPRESSED_STATUSES.includes(c.marketingStatus) || effectiveBasis(c) === "Unknown basis")) out.add(normEmail(c.email));
     }
   }
   return out;
