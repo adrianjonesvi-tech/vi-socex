@@ -8,6 +8,7 @@
 //
 //   visocex-suppressions:  <tenantId>/<encoded email>  → { email, at, via, jobId? }
 //   visocex-send-jobs:     <jobId>                     → the queued send (see send-email.mts)
+//   (sender and domain stores are described further down)
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 
@@ -43,30 +44,92 @@ export function fromHeader(name: string, address: string) {
   return n ? `"${n}" <${address}>` : address;
 }
 
-// Who a workspace's marketing emails come from, from its Company Info: the
-// chosen Email sender name (or, if left blank, the company's name) and the
-// workspace's own sending address. Either can come back empty.
-export function workspaceSender(companyInfo: any) {
-  const ci = companyInfo || {};
-  const name = cleanSenderName(ci.emailSenderName) || cleanSenderName(ci.name);
-  const raw = normEmail(ci.emailSenderAddress);
-  return { name, address: raw && isValidEmail(raw) ? raw : "" };
+// ---- Who each workspace's marketing emails come from ----------------------
+//
+// All email goes through the site's single Resend account. Each workspace has
+// its own sender (name + address), which only its admins can change, and each
+// sending domain belongs to exactly one workspace, so no workspace can send as
+// another. A domain becomes a workspace's when one of its admins sets it up
+// from the app (Resend then proves control of it through DNS), or — for a
+// domain already verified in Resend before this — when an admin whose own
+// login is on that domain claims it.
+//
+//   visocex-email-senders:  <tenantId>  → { name, address, updatedBy, updatedAt }
+//   visocex-email-domains:  <domain>    → { tenantId, resendId, region, addedBy, addedAt, how }
+
+export const SENDERS_STORE = "visocex-email-senders";
+export const DOMAINS_STORE = "visocex-email-domains";
+// Where Resend sends from for domains set up here (Ireland, close to UK customers).
+export const RESEND_REGION = "eu-west-1";
+
+export function domainOf(address: string) {
+  return (normEmail(address).split("@")[1] || "").replace(/\.$/, "");
 }
 
-// Is the address's domain verified with Resend? Resend refuses to send from
-// anything else. A key without permission to list domains can't check, so
-// the send goes ahead and Resend's own answer is reported per recipient.
-export async function checkSendingDomain(apiKey: string, address: string) {
-  const domain = address.split("@")[1] || "";
+// The workspace's sender: its saved name (or, if none, the company's legal
+// name from Company Info) and its saved address. Either can be empty.
+export async function loadSender(getStore: StoreFactory, tenantId: string) {
+  const [rec, ci] = await Promise.all([
+    getStore({ name: SENDERS_STORE, consistency: "strong" }).get(tenantId, { type: "json" }),
+    getStore({ name: "visocex-data", consistency: "strong" }).get(`${tenantId}__company_info`, { type: "json" }),
+  ]);
+  const customName = cleanSenderName(rec && rec.name);
+  const defaultName = cleanSenderName(ci && ci.name);
+  const raw = normEmail(rec && rec.address);
+  return {
+    name: customName || defaultName, customName, defaultName,
+    address: raw && isValidEmail(raw) ? raw : "",
+    updatedBy: (rec && rec.updatedBy) || "", updatedAt: (rec && rec.updatedAt) || null,
+  };
+}
+
+// A small Resend API helper. `status` 0 means Resend couldn't be reached.
+export async function resendApi(apiKey: string, method: string, path: string, body?: unknown) {
   try {
-    const resp = await fetch("https://api.resend.com/domains", { headers: { "Authorization": `Bearer ${apiKey}` } });
-    if (!resp.ok) return { ok: true, checked: false, domain };
-    const body: any = await resp.json();
-    const match = (body.data || []).find((d: any) => String(d.name || "").toLowerCase() === domain);
-    return { ok: !!match && match.status === "verified", checked: true, domain, status: match ? match.status : "not added" };
+    const resp = await fetch(`https://api.resend.com${path}`, {
+      method,
+      headers: { "Authorization": `Bearer ${apiKey}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    const data: any = await resp.json().catch(() => ({}));
+    return { ok: resp.ok, status: resp.status, data };
   } catch {
-    return { ok: true, checked: false, domain };
+    return { ok: false, status: 0, data: {} };
   }
+}
+
+// Everything needed to decide whether a workspace can send, and what to tell
+// its people if it can't. `problem` is null when ready.
+export async function senderStatus(getStore: StoreFactory, apiKey: string, tenantId: string) {
+  const sender = await loadSender(getStore, tenantId);
+  const domain = sender.address ? domainOf(sender.address) : "";
+  const out: any = { sender, domain, owner: "none", resend: null, ready: false, problem: null };
+  const fail = (code: string, message: string) => { out.problem = { code, message }; return out; };
+
+  if (!sender.name) return fail("no_name", "There's no sender name yet. An admin can set one under Company Info → Email sender.");
+  if (!sender.address) return fail("no_address", "There's no sending address yet. An admin can set one up under Company Info → Email sender.");
+
+  const owner = await getStore({ name: DOMAINS_STORE, consistency: "strong" }).get(domain, { type: "json" });
+  out.owner = !owner ? "none" : owner.tenantId === tenantId ? "this" : "other";
+  if (out.owner === "other") return fail("other_workspace", `${domain} is set up for another workspace, so it can't be used here. An admin can choose an address on your own domain under Company Info → Email sender.`);
+
+  if (!apiKey) return fail("no_key", "Email sending isn't configured on this site yet.");
+  const list = await resendApi(apiKey, "GET", "/domains");
+  if (list.status === 0) return fail("unreachable", "Couldn't reach the email service to check your domain. Try again in a moment.");
+  if (list.status === 401 || list.status === 403) {
+    out.resend = { canManage: false };
+    return fail("key_cannot_manage", "The site's email key can only send email, so domains can't be checked or set up from here. Ask vi-tech to switch it to a full-access Resend key.");
+  }
+  const found = ((list.data && list.data.data) || []).find((d: any) => String(d.name || "").toLowerCase() === domain);
+  out.resend = { canManage: true, found: !!found, id: found ? found.id : null, status: found ? found.status : "not_added", region: found ? found.region : null, records: [] };
+  if (found && out.owner === "this") {
+    const detail = await resendApi(apiKey, "GET", `/domains/${encodeURIComponent(found.id)}`);
+    if (detail.ok) { out.resend.status = detail.data.status || out.resend.status; out.resend.records = detail.data.records || []; }
+  }
+  if (out.owner !== "this") return fail("not_set_up", `${domain} hasn't been set up for sending from this workspace yet. An admin can start it under Company Info → Email sender.`);
+  if (out.resend.status !== "verified") return fail("not_verified", `${domain} is set up but not verified yet (status: ${out.resend.status.replace(/_/g, " ")}). Its DNS records need adding, then an admin can press "Check again" under Company Info → Email sender.`);
+  out.ready = true;
+  return out;
 }
 
 export function isValidEmail(s: string) {

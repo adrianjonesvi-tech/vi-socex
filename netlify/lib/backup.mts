@@ -14,7 +14,7 @@ export const BACKUP_STORE = "visocex-backups";
 // backed up — they're short-lived and restoring them would revive old logins.
 // The unsubscribe list is included because losing it would mean emailing people
 // who opted out.
-export const DAILY_SOURCES = ["visocex-data", "visocex-tenants", "visocex-report-jobs", "visocex-suppressions"];
+export const DAILY_SOURCES = ["visocex-data", "visocex-tenants", "visocex-report-jobs", "visocex-suppressions", "visocex-email-senders", "visocex-email-domains"];
 // Uploaded files are immutable (random UUID keys, never overwritten), so they
 // are copied incrementally instead of every day.
 export const ASSET_SOURCE = "visocex-asset-files";

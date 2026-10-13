@@ -61,9 +61,21 @@ whichever audience was picked. Open tabs pull the list and mark matching contact
 the normal merge path. Send jobs (`visocex-send-jobs`) hold the per-job secret that signs unsubscribe
 links, so don't delete them — old emails' links stop working without them.
 
+### Who emails come from (per workspace)
+All email goes through the site's one Resend account (`RESEND_KEY`, which must be a **full-access** key so
+the app can add and check domains). Each workspace sends from its own name and address on its own
+domain, set up by a workspace **admin** (`isAdmin: true` on the login record in `visocex-tenants`) under
+Company Info → Email sender (`email-sender.mts`): save name/address → "Set up <domain>" adds it to
+Resend (region eu-west-1) → add the DNS records shown → "Check again". Stores: `visocex-email-senders`
+(`<tenantId>` → name, address) and `visocex-email-domains` (`<domain>` → owning tenantId). A domain
+belongs to one workspace; one already in Resend can only be linked by an admin whose login is on it.
+`send-email` refuses until the workspace's sender is complete, owned and verified. Admins are set
+directly on the login records; there's no admin-management screen yet.
+
 ## Backups
 `backup-daily.mts` (scheduled, 00:00 UTC, logic in `netlify/lib/backup.mts`) copies `visocex-data`,
-`visocex-tenants`, `visocex-report-jobs` and `visocex-suppressions` into the `visocex-backups` store under
+`visocex-tenants`, `visocex-report-jobs`, `visocex-suppressions`, `visocex-email-senders` and
+`visocex-email-domains` into the `visocex-backups` store under
 `daily/<YYYY-MM-DD>/<store>/<key>` (original metadata kept), writes `manifests/<date>`, copies uploaded
 files once to `assets/<key>`, and keeps 30 days. Outcome: `status/last-run` and `status/last-success`
 in that store, plus `[backup]` lines in the function log. Run on demand from Netlify → Logs → Functions

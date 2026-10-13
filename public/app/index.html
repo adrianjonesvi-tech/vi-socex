@@ -1533,7 +1533,7 @@ function App({ tenant, onLogout, token, onUpdateTenant }) {
           {tab === "assets" && <AssetsView assets={assets} addAsset={addAsset} deleteAsset={deleteAsset} token={token} />}
           {tab === "company" && <CompanyInfoView companyInfo={companyInfo} setCompanyInfo={setCompanyInfo} setTab={setTab} setPendingTopic={setPendingTopic} />}
           {tab === "brand" && <BrandView brand={brand} setBrand={setBrand} />}
-          {tab === "questionnaires" && <QuestionnairesView templates={questionnaireTemplates} addTemplate={addQuestionnaireTemplate} updateTemplate={updateQuestionnaireTemplate} deleteTemplate={deleteQuestionnaireTemplate} questionnaireSubmissions={questionnaireSubmissions} addQuestionnaireSubmission={addQuestionnaireSubmission} questionnaireSends={questionnaireSends} addQuestionnaireSend={addQuestionnaireSend} updateQuestionnaireSend={updateQuestionnaireSend} connections={connections} leads={leads} brand={brand} setBrand={setBrand} products={products} tenantId={tenant.id} contacts={contacts} companies={companies} companyInfo={companyInfo} setCompanyInfo={setCompanyInfo} />}
+          {tab === "questionnaires" && <QuestionnairesView templates={questionnaireTemplates} addTemplate={addQuestionnaireTemplate} updateTemplate={updateQuestionnaireTemplate} deleteTemplate={deleteQuestionnaireTemplate} questionnaireSubmissions={questionnaireSubmissions} addQuestionnaireSubmission={addQuestionnaireSubmission} questionnaireSends={questionnaireSends} addQuestionnaireSend={addQuestionnaireSend} updateQuestionnaireSend={updateQuestionnaireSend} connections={connections} leads={leads} brand={brand} setBrand={setBrand} products={products} tenantId={tenant.id} contacts={contacts} companies={companies} />}
           {tab === "publish" && <PublishView posts={posts} campaigns={campaigns} connections={connections} setTab={setTab} addPost={addPost} updatePost={updatePost} deletePost={deletePost} />}
           {tab === "studio" && <StudioView addPost={addPost} addArticle={addArticle} deleteArticle={deleteArticle} articles={articles} products={products} personas={personas} connections={connections} brand={brand} setTab={setTab} pendingTopic={pendingTopic} clearPendingTopic={() => setPendingTopic("")} />}
           {tab === "products" && <ProductsView products={products} addProduct={addProduct} updateProduct={updateProduct} deleteProduct={deleteProduct} posts={posts} articles={articles} setTab={setTab} setPendingTopic={setPendingTopic} />}
@@ -4826,15 +4826,11 @@ function QuestionnaireResults({ template, submissions, brand, setBrand, products
   );
 }
 
-function DistributionPanel({ template, connections, leads, sends, onSend, onUpdateSend, submissions, tenantId, contacts, companies, companyInfo, setCompanyInfo }) {
-  // Emails go out under the workspace's own sender name (blank = the company
-  // name) and address, both from Company Info. The server refuses to send
-  // until both are set; keep in step with workspaceSender() in netlify/lib/email.mts.
-  const ci = companyInfo || {};
-  const senderName = ((ci.emailSenderName || "").trim() || (ci.name || "").trim());
-  const senderAddressRaw = (ci.emailSenderAddress || "").trim();
-  const senderAddress = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(senderAddressRaw) ? senderAddressRaw : "";
-  const [senderDraft, setSenderDraft] = useState({ name: "", address: "" });
+function DistributionPanel({ template, connections, leads, sends, onSend, onUpdateSend, submissions, tenantId, contacts, companies }) {
+  // Emails go out from the workspace's own sender, set up by an admin under
+  // Company Info → Email sender. The server refuses to send until it's ready.
+  const { info: senderInfo, error: senderError, reload: reloadSender } = useEmailSender();
+  const senderReady = !!(senderInfo && senderInfo.ready);
   const [audienceType, setAudienceType] = useState("email");
   const [linkCopied, setLinkCopied] = useState(false);
   const [audienceRef, setAudienceRef] = useState("");
@@ -4867,9 +4863,6 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
   async function attemptRealSend(recipients, emailCandidates) {
     setSending(true); setSendResult(null);
     try {
-      // A sender name saved moments ago may still be on its way to the server,
-      // which checks it — give that save a few seconds to land first.
-      for (let waited = 0; __hasPending("company_info") && waited < 10000; waited += 250) await new Promise(r => setTimeout(r, 250));
       const fullMessage = `${message}\n\nTake the survey here: ${shareLink}`;
       const res = await fetch("/api/send-email", {
         method: "POST",
@@ -4879,7 +4872,10 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
       const data = await res.json();
       if (res.status === 401) setSendResult({ error: "Your session has expired — sign out and back in, then send again." });
       else if (res.status === 501) setSendResult({ needsSetup: true, message: data.error });
-      else if (!res.ok || !data.jobId) setSendResult({ error: data.error || "Couldn't send — try again.", skipped: data.skipped || [], suppressed: data.suppressed || [] });
+      else if (!res.ok || !data.jobId) {
+        setSendResult({ error: data.error || "Couldn't send — try again.", skipped: data.skipped || [], suppressed: data.suppressed || [] });
+        if (data.senderProblem) reloadSender();
+      }
       else {
         // Queued: the server sends in the background and this panel polls for progress.
         setSendResult({ queued: data.queued, skipped: data.skipped || [], suppressed: data.suppressed || [], progress: null });
@@ -4944,7 +4940,7 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
     attemptRealSend(recipients, recipients);
   }
 
-  const canSend = !!senderName && !!senderAddress && (audienceType === "custom" ? customRecipients.length > 0
+  const canSend = senderReady && (audienceType === "custom" ? customRecipients.length > 0
     : audienceType === "leads" ? leads.length > 0
     : audienceType === "tag" ? (!!audienceRef || !!sectorFilter)
     : !!audienceRef);
@@ -5045,24 +5041,18 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>Message</div>
         <div style={{ marginBottom: 10 }}>
           <label style={{ fontSize: 11.5, color: C.inkMuted, display: "block", marginBottom: 4 }}>From</label>
-          {senderName && senderAddress ? (
-            <div style={{ fontSize: 12.5, color: C.ink }}>{senderName} &lt;{senderAddress}&gt; <span style={{ fontSize: 11, color: C.inkFaint }}>— change it under Company Info → Email sender</span></div>
-          ) : (() => {
-            const draftName = senderDraft.name.trim();
-            const draftAddress = senderDraft.address.trim();
-            const ok = (senderName || draftName) && (senderAddress || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(draftAddress));
-            return (
-              <div style={{ background: `${C.amber}10`, border: `1px solid ${C.amber}`, borderRadius: 6, padding: 10 }}>
-                <div style={{ fontSize: 11.5, color: C.inkMuted, marginBottom: 6 }}>Set who this workspace's emails come from: the name people see in their inbox, and your own email address (on a domain verified with the email service). It's saved to Company Info and used for every email this workspace sends.</div>
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                  {!senderName && <input value={senderDraft.name} onChange={e => setSenderDraft({ ...senderDraft, name: e.target.value })} maxLength={60} style={{ ...inputStyle, flex: 1, minWidth: 160 }} placeholder="Sender name" />}
-                  {!senderAddress && <input type="email" value={senderDraft.address} onChange={e => setSenderDraft({ ...senderDraft, address: e.target.value })} style={{ ...inputStyle, flex: 1, minWidth: 200 }} placeholder="Sender email, e.g. hello@yourbusiness.com" />}
-                  <button onClick={() => { if (ok && setCompanyInfo) setCompanyInfo({ ...ci, ...(senderName ? {} : { emailSenderName: draftName }), ...(senderAddress ? {} : { emailSenderAddress: draftAddress }) }); }} disabled={!ok} style={{ background: C.amber, color: "#3D2A00", border: "none", padding: "0 14px", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: ok ? "pointer" : "default", opacity: ok ? 1 : 0.5 }}>Save sender</button>
-                </div>
-                {senderName && <div style={{ fontSize: 11, color: C.inkFaint, marginTop: 6 }}>Name: {senderName}</div>}
-              </div>
-            );
-          })()}
+          {senderError ? (
+            <div style={{ fontSize: 12, color: "#E5484D" }}>{senderError} <button onClick={reloadSender} style={{ background: "none", border: `1px solid ${C.border}`, color: C.inkMuted, padding: "2px 8px", borderRadius: 5, fontSize: 11, cursor: "pointer" }}>Try again</button></div>
+          ) : !senderInfo ? (
+            <div style={{ fontSize: 12, color: C.inkFaint }}>Checking…</div>
+          ) : senderReady ? (
+            <div style={{ fontSize: 12.5, color: C.ink }}>{senderInfo.sender.name} &lt;{senderInfo.sender.address}&gt; <span style={{ fontSize: 11, color: C.inkFaint }}>— set under Company Info → Email sender</span></div>
+          ) : (
+            <div style={{ background: `${C.amber}10`, border: `1px solid ${C.amber}`, borderRadius: 6, padding: 10, fontSize: 11.5, color: C.inkMuted, lineHeight: 1.5 }}>
+              <strong style={{ color: C.ink }}>Emails can't be sent yet.</strong> {senderInfo.problem && senderInfo.problem.message}
+              {!senderInfo.isAdmin && senderInfo.admins.length > 0 && <div style={{ marginTop: 4, color: C.inkFaint }}>Your workspace admins: {senderInfo.admins.map(a => a.name || a.email).join(", ")}.</div>}
+            </div>
+          )}
         </div>
         <div style={{ marginBottom: 10 }}>
           <label style={{ fontSize: 11.5, color: C.inkMuted, display: "block", marginBottom: 4 }}>Subject</label>
@@ -5158,7 +5148,7 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
   );
 }
 
-function QuestionnaireTemplateView({ template, submissions, sends, connections, leads, brand, setBrand, addSubmission, addSend, updateSend, products, tenantId, contacts, companies, companyInfo, setCompanyInfo }) {
+function QuestionnaireTemplateView({ template, submissions, sends, connections, leads, brand, setBrand, addSubmission, addSend, updateSend, products, tenantId, contacts, companies }) {
   const [mode, setMode] = useState(submissions.length === 0 ? "survey" : "results");
   function handleSubmit(sub) {
     addSubmission(sub);
@@ -5173,7 +5163,7 @@ function QuestionnaireTemplateView({ template, submissions, sends, connections, 
       </div>
       {mode === "survey" && <QuestionnaireSurvey key={template.id} template={template} onSubmit={handleSubmit} onCancel={() => setMode("results")} />}
       {mode === "results" && <QuestionnaireResults template={template} submissions={submissions} brand={brand} setBrand={setBrand} products={products} />}
-      {mode === "distribute" && <DistributionPanel template={template} connections={connections} leads={leads} sends={sends} onSend={addSend} onUpdateSend={updateSend} submissions={submissions} tenantId={tenantId} contacts={contacts} companies={companies} companyInfo={companyInfo} setCompanyInfo={setCompanyInfo} />}
+      {mode === "distribute" && <DistributionPanel template={template} connections={connections} leads={leads} sends={sends} onSend={addSend} onUpdateSend={updateSend} submissions={submissions} tenantId={tenantId} contacts={contacts} companies={companies} />}
     </div>
   );
 }
@@ -5626,7 +5616,7 @@ function QuestionnaireAiAssist({ onGenerated, onCancel, products }) {
   );
 }
 
-function QuestionnairesView({ templates, addTemplate, updateTemplate, deleteTemplate, questionnaireSubmissions, addQuestionnaireSubmission, questionnaireSends, addQuestionnaireSend, updateQuestionnaireSend, connections, leads, brand, setBrand, products, tenantId, contacts, companies, companyInfo, setCompanyInfo }) {
+function QuestionnairesView({ templates, addTemplate, updateTemplate, deleteTemplate, questionnaireSubmissions, addQuestionnaireSubmission, questionnaireSends, addQuestionnaireSend, updateQuestionnaireSend, connections, leads, brand, setBrand, products, tenantId, contacts, companies }) {
   const [templateId, setTemplateId] = useState(templates[0] ? templates[0].id : "");
   const [flow, setFlow] = useState(null); // null | "choose" | "ai" | "builder"
   const [editingId, setEditingId] = useState(null);
@@ -5724,8 +5714,6 @@ function QuestionnairesView({ templates, addTemplate, updateTemplate, deleteTemp
               tenantId={tenantId}
               contacts={contacts}
               companies={companies}
-              companyInfo={companyInfo}
-              setCompanyInfo={setCompanyInfo}
             />
           ) : (
             <div style={{ padding: "20px 0", color: C.inkMuted, fontSize: 14 }}>No questionnaires yet — create one to get started.</div>
@@ -5912,6 +5900,191 @@ function BrandView({ brand, setBrand }) {
       ) : (
         <BrandWizard brand={brand} setBrand={setBrand} />
       )}
+    </div>
+  );
+}
+
+// Who this workspace's marketing emails come from, and whether its sending
+// domain is ready — loaded from /api/email-sender (see email-sender.mts).
+function useEmailSender() {
+  const [info, setInfo] = useState(null);
+  const [error, setError] = useState("");
+  async function load() {
+    try {
+      const res = await fetch("/api/email-sender", { headers: __authHeaders(), cache: "no-store" });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || "Couldn't load the email sender settings.");
+      setInfo(j); setError("");
+    } catch (e) {
+      setError(e.message || "Couldn't load the email sender settings.");
+    }
+  }
+  useEffect(() => { load(); }, []);
+  return { info, error, reload: load, setInfo };
+}
+
+const DNS_STATUS_LABELS = { verified: "Verified", pending: "Checking…", not_started: "Not checked yet", failed: "Not found", temporary_failure: "Not found yet" };
+
+// Company Info → Email sender: the guided setup. Everyone sees the status;
+// only workspace admins can change anything (the server enforces this too).
+function EmailSenderSetup() {
+  const { info, error, reload, setInfo } = useEmailSender();
+  const [draft, setDraft] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [actionError, setActionError] = useState("");
+  const [copied, setCopied] = useState("");
+
+  useEffect(() => {
+    if (info && draft === null) setDraft({ name: info.sender.customName || "", address: info.sender.address || "" });
+  }, [info]);
+
+  async function act(body, label) {
+    setBusy(label); setActionError("");
+    try {
+      const res = await fetch("/api/email-sender", { method: "POST", headers: __authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(body) });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || "That didn't work — try again.");
+      setInfo(j);
+      if (body.action === "save") setDraft({ name: j.sender.customName || "", address: j.sender.address || "" });
+    } catch (e) {
+      setActionError(e.message);
+    }
+    setBusy("");
+  }
+  function copy(text, key) {
+    try { navigator.clipboard.writeText(text); setCopied(key); setTimeout(() => setCopied(""), 1500); } catch (e) {}
+  }
+
+  const h3 = { fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, marginBottom: 4 };
+  const smallBtn = { background: "none", border: `1px solid ${C.border}`, color: C.inkMuted, padding: "4px 10px", borderRadius: 6, fontSize: 11.5, cursor: "pointer", whiteSpace: "nowrap" };
+  const mainBtn = enabled => ({ background: C.teal, color: "#032430", border: "none", padding: "8px 16px", borderRadius: 7, fontSize: 13, fontWeight: 600, cursor: enabled ? "pointer" : "default", opacity: enabled ? 1 : 0.5 });
+
+  if (error) return (
+    <div style={{ marginBottom: 28 }}>
+      <h3 style={h3}>Email sender</h3>
+      <div style={{ fontSize: 12.5, color: "#E5484D" }}>{error} <button onClick={reload} style={smallBtn}>Try again</button></div>
+    </div>
+  );
+  if (!info || draft === null) return (
+    <div style={{ marginBottom: 28 }}><h3 style={h3}>Email sender</h3><div style={{ fontSize: 12.5, color: C.inkFaint }}>Checking…</div></div>
+  );
+
+  const { sender, domain, problem, resend, isAdmin, admins } = info;
+  const records = (resend && resend.records) || [];
+  const adminNames = admins.map(a => a.name || a.email).join(", ");
+  const changed = draft.name.trim() !== (sender.customName || "") || draft.address.trim().toLowerCase() !== (sender.address || "");
+  const addressOk = !draft.address.trim() || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(draft.address.trim());
+  const status = resend && resend.status;
+  const recordsText = records.map(r => `${r.type}  ${r.name}  ${r.value}${r.priority != null ? `  (priority ${r.priority})` : ""}`).join("\n");
+  const mailBody = `Hi,\n\nPlease add these DNS records for ${domain} so we can send email from ${sender.address} through our email service (Resend):\n\n${recordsText}\n\nIf your DNS provider adds the domain automatically, enter only the first part of each name (e.g. "send" rather than "send.${domain}").\n\nThanks`;
+
+  return (
+    <div style={{ marginBottom: 28, maxWidth: 680 }}>
+      <h3 style={h3}>Email sender</h3>
+      <div style={{ fontSize: 12, color: C.inkFaint, marginBottom: 12, lineHeight: 1.5 }}>Who your marketing emails come from. Every workspace sends from its own address, on its own domain, so emails never appear to come from someone else's business. Marketing emails can't be sent until this shows Ready.</div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, fontSize: 12.5 }}>
+        <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3, padding: "2px 7px", borderRadius: 4, color: info.ready ? C.green : C.amber, border: `1px solid ${info.ready ? C.green : C.amber}` }}>{info.ready ? "Ready" : "Not ready"}</span>
+        <span style={{ color: C.inkMuted }}>{info.ready ? <>Emails come from <strong style={{ color: C.ink }}>{sender.name} &lt;{sender.address}&gt;</strong></> : problem && problem.message}</span>
+      </div>
+
+      {/* Step 1: name and address */}
+      <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: 14, marginBottom: 10 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 8 }}>1. Sender name and address</div>
+        {isAdmin ? (
+          <React.Fragment>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <div style={{ flex: 1, minWidth: 220 }}>
+                <input value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} maxLength={60} style={{ ...inputStyle, width: "100%" }} placeholder={sender.defaultName || "Sender name"} />
+                <div style={{ fontSize: 11, color: C.inkFaint, marginTop: 4 }}>{sender.defaultName ? `Leave blank to use your company name, "${sender.defaultName}".` : "Required — or fill in Company name above."}</div>
+              </div>
+              <div style={{ flex: 1, minWidth: 220 }}>
+                <input type="email" value={draft.address} onChange={e => setDraft({ ...draft, address: e.target.value })} style={{ ...inputStyle, width: "100%", borderColor: addressOk ? undefined : C.rose }} placeholder="e.g. hello@yourbusiness.com" />
+                <div style={{ fontSize: 11, color: C.inkFaint, marginTop: 4 }}>An address on your own business domain. It doesn't need its own mailbox.</div>
+              </div>
+            </div>
+            <button onClick={() => act({ action: "save", name: draft.name, address: draft.address }, "save")} disabled={!changed || !addressOk || !!busy} style={{ ...mainBtn(changed && addressOk && !busy), marginTop: 10 }}>{busy === "save" ? "Saving…" : "Save"}</button>
+          </React.Fragment>
+        ) : (
+          <div style={{ fontSize: 12.5, color: C.inkMuted, lineHeight: 1.6 }}>
+            Name: <strong style={{ color: C.ink }}>{sender.name || "not set"}</strong><br />
+            Address: <strong style={{ color: C.ink }}>{sender.address || "not set"}</strong>
+            <div style={{ fontSize: 11.5, color: C.inkFaint, marginTop: 6 }}>Only this workspace's admins can change who emails come from{adminNames ? ` — ${adminNames}` : ""}.</div>
+          </div>
+        )}
+      </div>
+
+      {/* Step 2: set the domain up */}
+      {sender.address && (
+        <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: 14, marginBottom: 10 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 8 }}>2. Set up {domain} for sending</div>
+          {problem && problem.code === "key_cannot_manage" ? (
+            <div style={{ fontSize: 12, color: C.amber, lineHeight: 1.5 }}>{problem.message}</div>
+          ) : info.owner === "other" ? (
+            <div style={{ fontSize: 12, color: C.amber, lineHeight: 1.5 }}>{problem.message}</div>
+          ) : info.owner === "this" ? (
+            <div style={{ fontSize: 12, color: C.green }}>Done — {domain} is registered for this workspace.</div>
+          ) : (
+            <React.Fragment>
+              <div style={{ fontSize: 12, color: C.inkMuted, lineHeight: 1.5, marginBottom: 8 }}>This registers {domain} with the email service and gives you a few DNS records to add, which prove you control the domain. Nothing changes on your website or existing email.</div>
+              {isAdmin
+                ? <button onClick={() => act({ action: "setup" }, "setup")} disabled={!!busy} style={mainBtn(!busy)}>{busy === "setup" ? "Setting up…" : `Set up ${domain}`}</button>
+                : <div style={{ fontSize: 11.5, color: C.inkFaint }}>An admin needs to start this{adminNames ? ` (${adminNames})` : ""}.</div>}
+            </React.Fragment>
+          )}
+        </div>
+      )}
+
+      {/* Step 3: add the DNS records, then check */}
+      {info.owner === "this" && resend && (
+        <div style={{ background: C.surface, border: `1px solid ${status === "verified" ? C.green : C.border}`, borderRadius: 8, padding: 14, marginBottom: 10 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 8 }}>3. Add the DNS records{status === "verified" ? " — verified" : ""}</div>
+          {status === "verified" ? (
+            <div style={{ fontSize: 12, color: C.green, lineHeight: 1.5 }}>All records found. {domain} is verified and ready to send from.</div>
+          ) : (
+            <div style={{ fontSize: 12, color: C.inkMuted, lineHeight: 1.6, marginBottom: 10 }}>
+              Add these records where {domain}'s DNS is managed — usually the company you bought the domain from or your web host (for example 123-reg, GoDaddy, IONOS, Cloudflare), or your IT provider. If you're not sure, send them to whoever looks after your website or email.
+              <ul style={{ margin: "6px 0 0 18px", padding: 0 }}>
+                <li>Copy each value exactly. If the provider adds the domain automatically, enter only the first part of the name (e.g. <code>send</code> instead of <code>send.{domain}</code>).</li>
+                <li>Leave any existing records alone — these are extra records, not replacements.</li>
+                <li>Changes usually show up within an hour, occasionally up to a day. Then press <strong>Check again</strong>.</li>
+              </ul>
+            </div>
+          )}
+          {records.length > 0 && (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+                <thead>
+                  <tr style={{ color: C.inkFaint, textAlign: "left" }}>
+                    {["Type", "Name", "Value", "Priority", "Status"].map(h => <th key={h} style={{ padding: "4px 6px", borderBottom: `1px solid ${C.border}`, fontWeight: 600 }}>{h}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {records.map((r, i) => (
+                    <tr key={i}>
+                      <td style={{ padding: "6px", borderBottom: `1px solid ${C.border}` }}>{r.type}</td>
+                      <td style={{ padding: "6px", borderBottom: `1px solid ${C.border}`, fontFamily: "'IBM Plex Mono', monospace" }}>{r.name} <button onClick={() => copy(r.name, `n${i}`)} style={{ ...smallBtn, padding: "1px 6px", fontSize: 10.5 }}>{copied === `n${i}` ? "Copied" : "Copy"}</button></td>
+                      <td style={{ padding: "6px", borderBottom: `1px solid ${C.border}`, fontFamily: "'IBM Plex Mono', monospace", wordBreak: "break-all", maxWidth: 280 }}>{r.value} <button onClick={() => copy(r.value, `v${i}`)} style={{ ...smallBtn, padding: "1px 6px", fontSize: 10.5 }}>{copied === `v${i}` ? "Copied" : "Copy"}</button></td>
+                      <td style={{ padding: "6px", borderBottom: `1px solid ${C.border}` }}>{r.priority != null ? r.priority : ""}</td>
+                      <td style={{ padding: "6px", borderBottom: `1px solid ${C.border}`, color: r.status === "verified" ? C.green : C.amber, whiteSpace: "nowrap" }}>{DNS_STATUS_LABELS[r.status] || r.status}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {status !== "verified" && (
+            <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
+              {isAdmin && <button onClick={() => act({ action: "verify" }, "verify")} disabled={!!busy} style={mainBtn(!busy)}>{busy === "verify" ? "Checking…" : "Check again"}</button>}
+              {records.length > 0 && <button onClick={() => copy(recordsText, "all")} style={smallBtn}>{copied === "all" ? "Copied" : "Copy all records"}</button>}
+              {records.length > 0 && <a href={`mailto:?subject=${encodeURIComponent(`DNS records for ${domain}`)}&body=${encodeURIComponent(mailBody)}`} style={{ ...smallBtn, textDecoration: "none", display: "inline-block" }}>Email these to whoever manages the domain</a>}
+              <span style={{ fontSize: 11, color: C.inkFaint }}>Status: {DNS_STATUS_LABELS[status] || status}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {actionError && <div style={{ fontSize: 12, color: "#E5484D", marginTop: 6 }}>{actionError}</div>}
     </div>
   );
 }
@@ -6185,17 +6358,7 @@ function CompanyInfoPanel({ companyInfo, setCompanyInfo, onOverviewRegenerate })
           <Field label="Phone"><input value={companyInfo.contactPhone} onChange={e => setCompanyInfo({ ...companyInfo, contactPhone: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder="+44 20 1234 5678" /></Field>
         </div>
 
-        <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, marginBottom: 4 }}>Email sender</h3>
-        <div style={{ fontSize: 12, color: C.inkFaint, marginBottom: 10 }}>Who your marketing emails come from. The name is what people see in their inbox and in the unsubscribe footer. The address must be your own, on a domain verified with the email service — emails can't be sent until it's set.</div>
-        <div style={{ display: "flex", gap: 12, marginBottom: 28, maxWidth: 640 }}>
-          <Field label="Sender name">
-            <input value={companyInfo.emailSenderName || ""} onChange={e => setCompanyInfo({ ...companyInfo, emailSenderName: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder={(companyInfo.name || "").trim() || "e.g. Vi-Tech"} maxLength={60} />
-            <div style={{ fontSize: 11, color: C.inkFaint, marginTop: 4 }}>{(companyInfo.name || "").trim() ? `Leave blank to use your company name, "${companyInfo.name.trim()}".` : "Required — or fill in Company name above."}</div>
-          </Field>
-          <Field label="Sender email address">
-            <input type="email" value={companyInfo.emailSenderAddress || ""} onChange={e => setCompanyInfo({ ...companyInfo, emailSenderAddress: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder="e.g. hello@yourbusiness.com" />
-          </Field>
-        </div>
+        <EmailSenderSetup />
 
         <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, marginBottom: 12 }}>FAQs</h3>
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>

@@ -99,7 +99,7 @@ export default async (req: Request, context: Context) => {
 
     const token = randomBytes(24).toString("hex");
     await sessionsStore.setJSON(token, { tenantId: tenant.id, email: tenant.email, createdAt: Date.now() });
-    return json({ token, tenant: { id: tenant.id, name: tenant.name, email: tenant.email, personName: tenant.personName || "", role: tenant.role || "", phone: tenant.phone || "" } });
+    return json({ token, tenant: { id: tenant.id, name: tenant.name, email: tenant.email, personName: tenant.personName || "", role: tenant.role || "", phone: tenant.phone || "", isAdmin: !!tenant.isAdmin } });
   }
 
   if (req.method === "GET" && action === "me") {
@@ -109,7 +109,7 @@ export default async (req: Request, context: Context) => {
     if (!session) return json({ error: "invalid or expired session" }, 401);
     const tenant = await tenantsStore.get(session.email, { type: "json" });
     if (!tenant) return json({ error: "tenant not found" }, 401);
-    return json({ tenant: { id: tenant.id, name: tenant.name, email: tenant.email, personName: tenant.personName || "", role: tenant.role || "", phone: tenant.phone || "" } });
+    return json({ tenant: { id: tenant.id, name: tenant.name, email: tenant.email, personName: tenant.personName || "", role: tenant.role || "", phone: tenant.phone || "", isAdmin: !!tenant.isAdmin } });
   }
 
   if (req.method === "POST" && action === "logout") {
@@ -205,7 +205,7 @@ export default async (req: Request, context: Context) => {
     const role = (body.role || "").trim();
     const phone = (body.phone || "").trim();
     await tenantsStore.setJSON(session.email, { ...tenant, personName, role, phone });
-    return json({ tenant: { id: tenant.id, name: tenant.name, email: tenant.email, personName, role, phone } });
+    return json({ tenant: { id: tenant.id, name: tenant.name, email: tenant.email, personName, role, phone, isAdmin: !!tenant.isAdmin } });
   }
 
   // List everyone who shares the current session's tenantId — the roster for
@@ -218,7 +218,7 @@ export default async (req: Request, context: Context) => {
     for (const b of blobs) {
       const record = await tenantsStore.get(b.key, { type: "json" });
       if (record && record.id === session.tenantId) {
-        members.push({ email: record.email, personName: record.personName || "", role: record.role || "", phone: record.phone || "" });
+        members.push({ email: record.email, personName: record.personName || "", role: record.role || "", phone: record.phone || "", isAdmin: !!record.isAdmin });
       }
     }
     return json({ members });
