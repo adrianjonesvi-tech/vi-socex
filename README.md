@@ -82,6 +82,13 @@ in that store, plus `[backup]` lines in the function log. Run on demand from Net
 → backup-daily → Run now. Optional env var `BACKUP_ALERT_EMAIL` emails on failure.
 These backups live on the same Netlify site — keep periodic off-site copies too.
 
+On-demand workspace snapshots (`snapshot.mts`, `/api/snapshot`, logic in `netlify/lib/snapshot.mts`):
+`POST` copies every section of the caller's workspace to `snapshots/<tenantId>/<id>/<section>` in the
+same backups store, reads each copy back to check it, then writes `snapshot-manifests/<tenantId>/<id>`
+(no manifest = not a snapshot). `GET` lists the workspace's snapshots. Kept 30 days; past 50 recent
+snapshots a new one is refused rather than pushing older ones out. Meant to be taken automatically
+before an import or undo; restoring from one is part of the undo work.
+
 ## Deploying
 Deployed directly to the Netlify site above (no build step). From the repo root with the Netlify CLI
 (`netlify.toml` points it at `public/` and `netlify/functions/`):
