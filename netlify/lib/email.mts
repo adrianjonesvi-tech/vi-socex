@@ -118,7 +118,7 @@ export async function senderStatus(getStore: StoreFactory, apiKey: string, tenan
   if (list.status === 0) return fail("unreachable", "Couldn't reach the email service to check your domain. Try again in a moment.");
   if (list.status === 401 || list.status === 403) {
     out.resend = { canManage: false };
-    return fail("key_cannot_manage", "The site's email key can only send email, so domains can't be checked or set up from here. Ask vi-tech to switch it to a full-access Resend key.");
+    return fail("key_cannot_manage", "Domain setup isn't available yet: the platform's email service key can only send email, and needs switching to a full-access Resend key. That's a platform change, not something your workspace needs to do — contact Vi-SOCEX support.");
   }
   const found = ((list.data && list.data.data) || []).find((d: any) => String(d.name || "").toLowerCase() === domain);
   out.resend = { canManage: true, found: !!found, id: found ? found.id : null, status: found ? found.status : "not_added", region: found ? found.region : null, records: [] };

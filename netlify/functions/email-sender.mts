@@ -77,7 +77,7 @@ export default async (req: Request, context: Context) => {
         // Already in Resend from before this setup existed: only an admin whose
         // own login is on that domain can link it to this workspace.
         if (domainOf(session.email || "") !== domain) {
-          return json({ error: `${domain} is already registered with the email service but isn't linked to this workspace. An admin whose own login is an @${domain} address can link it, or contact vi-tech.` }, 403);
+          return json({ error: `${domain} is already registered with the email service but isn't linked to this workspace. An admin whose own login is an @${domain} address can link it, or contact Vi-SOCEX support.` }, 403);
         }
         await domains.setJSON(domain, { tenantId, resendId: st.resend.id, region: st.resend.region, addedBy: session.email, addedAt: new Date().toISOString(), how: "claimed existing" });
         console.log(`email-sender: ${session.email} linked existing domain ${domain} to ${tenantId}`);
