@@ -4827,10 +4827,14 @@ function QuestionnaireResults({ template, submissions, brand, setBrand, products
 }
 
 function DistributionPanel({ template, connections, leads, sends, onSend, onUpdateSend, submissions, tenantId, contacts, companies, companyInfo, setCompanyInfo }) {
-  // Emails go out under the workspace's chosen sender name (Company Info);
-  // the server refuses to send until one is set.
-  const senderName = ((companyInfo && companyInfo.emailSenderName) || "").trim();
-  const [senderDraft, setSenderDraft] = useState("");
+  // Emails go out under the workspace's own sender name (blank = the company
+  // name) and address, both from Company Info. The server refuses to send
+  // until both are set; keep in step with workspaceSender() in netlify/lib/email.mts.
+  const ci = companyInfo || {};
+  const senderName = ((ci.emailSenderName || "").trim() || (ci.name || "").trim());
+  const senderAddressRaw = (ci.emailSenderAddress || "").trim();
+  const senderAddress = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(senderAddressRaw) ? senderAddressRaw : "";
+  const [senderDraft, setSenderDraft] = useState({ name: "", address: "" });
   const [audienceType, setAudienceType] = useState("email");
   const [linkCopied, setLinkCopied] = useState(false);
   const [audienceRef, setAudienceRef] = useState("");
@@ -4940,7 +4944,7 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
     attemptRealSend(recipients, recipients);
   }
 
-  const canSend = !!senderName && (audienceType === "custom" ? customRecipients.length > 0
+  const canSend = !!senderName && !!senderAddress && (audienceType === "custom" ? customRecipients.length > 0
     : audienceType === "leads" ? leads.length > 0
     : audienceType === "tag" ? (!!audienceRef || !!sectorFilter)
     : !!audienceRef);
@@ -5041,17 +5045,24 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>Message</div>
         <div style={{ marginBottom: 10 }}>
           <label style={{ fontSize: 11.5, color: C.inkMuted, display: "block", marginBottom: 4 }}>From</label>
-          {senderName ? (
-            <div style={{ fontSize: 12.5, color: C.ink }}>{senderName} <span style={{ fontSize: 11, color: C.inkFaint }}>— change it under Company Info → Email sender name</span></div>
-          ) : (
-            <div style={{ background: `${C.amber}10`, border: `1px solid ${C.amber}`, borderRadius: 6, padding: 10 }}>
-              <div style={{ fontSize: 11.5, color: C.inkMuted, marginBottom: 6 }}>Choose the name people will see in their inbox. It's saved to Company Info and used for every email this workspace sends.</div>
-              <div style={{ display: "flex", gap: 6 }}>
-                <input value={senderDraft} onChange={e => setSenderDraft(e.target.value)} maxLength={60} style={{ ...inputStyle, flex: 1 }} placeholder={companyInfo && companyInfo.name ? `e.g. ${companyInfo.name.trim()}` : "Sender name"} />
-                <button onClick={() => { if (senderDraft.trim() && setCompanyInfo) setCompanyInfo({ ...companyInfo, emailSenderName: senderDraft.trim() }); }} disabled={!senderDraft.trim()} style={{ background: C.amber, color: "#3D2A00", border: "none", padding: "0 14px", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: senderDraft.trim() ? "pointer" : "default", opacity: senderDraft.trim() ? 1 : 0.5 }}>Save sender name</button>
+          {senderName && senderAddress ? (
+            <div style={{ fontSize: 12.5, color: C.ink }}>{senderName} &lt;{senderAddress}&gt; <span style={{ fontSize: 11, color: C.inkFaint }}>— change it under Company Info → Email sender</span></div>
+          ) : (() => {
+            const draftName = senderDraft.name.trim();
+            const draftAddress = senderDraft.address.trim();
+            const ok = (senderName || draftName) && (senderAddress || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(draftAddress));
+            return (
+              <div style={{ background: `${C.amber}10`, border: `1px solid ${C.amber}`, borderRadius: 6, padding: 10 }}>
+                <div style={{ fontSize: 11.5, color: C.inkMuted, marginBottom: 6 }}>Set who this workspace's emails come from: the name people see in their inbox, and your own email address (on a domain verified with the email service). It's saved to Company Info and used for every email this workspace sends.</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {!senderName && <input value={senderDraft.name} onChange={e => setSenderDraft({ ...senderDraft, name: e.target.value })} maxLength={60} style={{ ...inputStyle, flex: 1, minWidth: 160 }} placeholder="Sender name" />}
+                  {!senderAddress && <input type="email" value={senderDraft.address} onChange={e => setSenderDraft({ ...senderDraft, address: e.target.value })} style={{ ...inputStyle, flex: 1, minWidth: 200 }} placeholder="Sender email, e.g. hello@yourbusiness.com" />}
+                  <button onClick={() => { if (ok && setCompanyInfo) setCompanyInfo({ ...ci, ...(senderName ? {} : { emailSenderName: draftName }), ...(senderAddress ? {} : { emailSenderAddress: draftAddress }) }); }} disabled={!ok} style={{ background: C.amber, color: "#3D2A00", border: "none", padding: "0 14px", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: ok ? "pointer" : "default", opacity: ok ? 1 : 0.5 }}>Save sender</button>
+                </div>
+                {senderName && <div style={{ fontSize: 11, color: C.inkFaint, marginTop: 6 }}>Name: {senderName}</div>}
               </div>
-            </div>
-          )}
+            );
+          })()}
         </div>
         <div style={{ marginBottom: 10 }}>
           <label style={{ fontSize: 11.5, color: C.inkMuted, display: "block", marginBottom: 4 }}>Subject</label>
@@ -6174,10 +6185,16 @@ function CompanyInfoPanel({ companyInfo, setCompanyInfo, onOverviewRegenerate })
           <Field label="Phone"><input value={companyInfo.contactPhone} onChange={e => setCompanyInfo({ ...companyInfo, contactPhone: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder="+44 20 1234 5678" /></Field>
         </div>
 
-        <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, marginBottom: 4 }}>Email sender name</h3>
-        <div style={{ fontSize: 12, color: C.inkFaint, marginBottom: 10 }}>The name people see in their inbox when you send marketing emails, and in the unsubscribe footer. Emails can't be sent until this is set.</div>
-        <div style={{ display: "flex", gap: 12, marginBottom: 28, maxWidth: 420 }}>
-          <input value={companyInfo.emailSenderName || ""} onChange={e => setCompanyInfo({ ...companyInfo, emailSenderName: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder={companyInfo.name ? `e.g. ${companyInfo.name.trim()}` : "e.g. Vi-Tech"} maxLength={60} />
+        <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, marginBottom: 4 }}>Email sender</h3>
+        <div style={{ fontSize: 12, color: C.inkFaint, marginBottom: 10 }}>Who your marketing emails come from. The name is what people see in their inbox and in the unsubscribe footer. The address must be your own, on a domain verified with the email service — emails can't be sent until it's set.</div>
+        <div style={{ display: "flex", gap: 12, marginBottom: 28, maxWidth: 640 }}>
+          <Field label="Sender name">
+            <input value={companyInfo.emailSenderName || ""} onChange={e => setCompanyInfo({ ...companyInfo, emailSenderName: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder={(companyInfo.name || "").trim() || "e.g. Vi-Tech"} maxLength={60} />
+            <div style={{ fontSize: 11, color: C.inkFaint, marginTop: 4 }}>{(companyInfo.name || "").trim() ? `Leave blank to use your company name, "${companyInfo.name.trim()}".` : "Required — or fill in Company name above."}</div>
+          </Field>
+          <Field label="Sender email address">
+            <input type="email" value={companyInfo.emailSenderAddress || ""} onChange={e => setCompanyInfo({ ...companyInfo, emailSenderAddress: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder="e.g. hello@yourbusiness.com" />
+          </Field>
         </div>
 
         <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, marginBottom: 12 }}>FAQs</h3>

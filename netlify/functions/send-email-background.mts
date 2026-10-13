@@ -52,8 +52,9 @@ export default async (req: Request, context: Context) => {
   if (job.status === "done") return new Response("ok");
 
   const apiKey = Netlify.env.get("RESEND_KEY");
-  const fromAddress = (Netlify.env.get("RESEND_FROM_EMAIL") || "onboarding@resend.dev").trim();
-  // The workspace's chosen sender name, saved on the job when it was queued.
+  // The workspace's own sender name and address, saved on the job when it was
+  // queued. (Jobs queued before per-workspace addresses fall back to the site's.)
+  const fromAddress = (job.senderAddress || Netlify.env.get("RESEND_FROM_EMAIL") || "onboarding@resend.dev").trim();
   const from = fromHeader(job.senderName || Netlify.env.get("RESEND_FROM_NAME") || "", fromAddress);
   const started = Date.now();
   const save = () => jobs.setJSON(jobId, job);

@@ -1,7 +1,7 @@
 import type { Context, Config } from "@netlify/functions";
 import { getStore } from "@netlify/blobs";
 import { randomBytes, randomUUID } from "node:crypto";
-import { SEND_JOBS_STORE, MAX_RECIPIENTS, cleanSenderName, isValidEmail, normEmail, suppressedEmails } from "../lib/email.mts";
+import { SEND_JOBS_STORE, MAX_RECIPIENTS, checkSendingDomain, isValidEmail, normEmail, suppressedEmails, workspaceSender } from "../lib/email.mts";
 
 // Queues a marketing email send via Resend (https://resend.com). Needs a
 // RESEND_KEY environment variable set in the Netlify site — without it, this
@@ -70,12 +70,20 @@ export default async (req: Request, context: Context) => {
     return json({ error: `That's ${unique.length} addresses — the limit is ${MAX_RECIPIENTS} per send. Split it into smaller groups.` }, 400);
   }
 
-  // Every email goes out under the workspace's chosen sender name (Company Info
-  // → Email sender name). Nothing is sent until one has been set.
+  // Every workspace sends under its own name and from its own address (Company
+  // Info → Email sender). Nothing is sent until both are set and the address's
+  // domain is verified with Resend.
   const companyInfo = await getStore({ name: "visocex-data", consistency: "strong" }).get(`${session.tenantId}__company_info`, { type: "json" });
-  const senderName = cleanSenderName(companyInfo && companyInfo.emailSenderName);
+  const { name: senderName, address: senderAddress } = workspaceSender(companyInfo);
   if (!senderName) {
-    return json({ error: "Set your email sender name first — it's the name people see in their inbox (Company Info → Email sender name).", needsSenderName: true }, 400);
+    return json({ error: "Set your email sender name first — it's the name people see in their inbox (Company Info → Email sender).", needsSenderName: true }, 400);
+  }
+  if (!senderAddress) {
+    return json({ error: "Set this workspace's own sending email address first (Company Info → Email sender).", needsSenderAddress: true }, 400);
+  }
+  const domainCheck = await checkSendingDomain(Netlify.env.get("RESEND_KEY")!, senderAddress);
+  if (!domainCheck.ok) {
+    return json({ error: `${domainCheck.domain} isn't verified with the email service yet (status: ${domainCheck.status}), so nothing can be sent from ${senderAddress}. Ask your administrator to verify the domain in Resend, or use an address on a verified domain.`, needsVerifiedDomain: true }, 400);
   }
 
   const blocked = await suppressedEmails(getStore, session.tenantId);
@@ -93,6 +101,7 @@ export default async (req: Request, context: Context) => {
     createdBy: session.email || "",
     createdAt: Date.now(),
     senderName,
+    senderAddress,
     // Unsubscribe links point back at whichever site sent the email.
     baseUrl: new URL(req.url).origin,
     subject,

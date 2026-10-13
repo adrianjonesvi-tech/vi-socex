@@ -43,6 +43,32 @@ export function fromHeader(name: string, address: string) {
   return n ? `"${n}" <${address}>` : address;
 }
 
+// Who a workspace's marketing emails come from, from its Company Info: the
+// chosen Email sender name (or, if left blank, the company's name) and the
+// workspace's own sending address. Either can come back empty.
+export function workspaceSender(companyInfo: any) {
+  const ci = companyInfo || {};
+  const name = cleanSenderName(ci.emailSenderName) || cleanSenderName(ci.name);
+  const raw = normEmail(ci.emailSenderAddress);
+  return { name, address: raw && isValidEmail(raw) ? raw : "" };
+}
+
+// Is the address's domain verified with Resend? Resend refuses to send from
+// anything else. A key without permission to list domains can't check, so
+// the send goes ahead and Resend's own answer is reported per recipient.
+export async function checkSendingDomain(apiKey: string, address: string) {
+  const domain = address.split("@")[1] || "";
+  try {
+    const resp = await fetch("https://api.resend.com/domains", { headers: { "Authorization": `Bearer ${apiKey}` } });
+    if (!resp.ok) return { ok: true, checked: false, domain };
+    const body: any = await resp.json();
+    const match = (body.data || []).find((d: any) => String(d.name || "").toLowerCase() === domain);
+    return { ok: !!match && match.status === "verified", checked: true, domain, status: match ? match.status : "not added" };
+  } catch {
+    return { ok: true, checked: false, domain };
+  }
+}
+
 export function isValidEmail(s: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim());
 }
