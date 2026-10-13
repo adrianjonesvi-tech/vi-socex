@@ -1,7 +1,7 @@
 import type { Context, Config } from "@netlify/functions";
 import { getStore } from "@netlify/blobs";
 import { randomBytes, randomUUID } from "node:crypto";
-import { SEND_JOBS_STORE, MAX_RECIPIENTS, isValidEmail, normEmail, suppressedEmails } from "../lib/email.mts";
+import { SEND_JOBS_STORE, MAX_RECIPIENTS, cleanSenderName, isValidEmail, normEmail, suppressedEmails } from "../lib/email.mts";
 
 // Queues a marketing email send via Resend (https://resend.com). Needs a
 // RESEND_KEY environment variable set in the Netlify site — without it, this
@@ -70,6 +70,14 @@ export default async (req: Request, context: Context) => {
     return json({ error: `That's ${unique.length} addresses — the limit is ${MAX_RECIPIENTS} per send. Split it into smaller groups.` }, 400);
   }
 
+  // Every email goes out under the workspace's chosen sender name (Company Info
+  // → Email sender name). Nothing is sent until one has been set.
+  const companyInfo = await getStore({ name: "visocex-data", consistency: "strong" }).get(`${session.tenantId}__company_info`, { type: "json" });
+  const senderName = cleanSenderName(companyInfo && companyInfo.emailSenderName);
+  if (!senderName) {
+    return json({ error: "Set your email sender name first — it's the name people see in their inbox (Company Info → Email sender name).", needsSenderName: true }, 400);
+  }
+
   const blocked = await suppressedEmails(getStore, session.tenantId);
   const suppressed = unique.filter(e => blocked.has(e));
   const toSend = unique.filter(e => !blocked.has(e));
@@ -77,7 +85,6 @@ export default async (req: Request, context: Context) => {
     return json({ queued: 0, skipped, suppressed, error: "Everyone on this list has unsubscribed, is suppressed, or has no recorded consent basis — nothing was sent." }, 200);
   }
 
-  const tenant = session.email ? await getStore("visocex-tenants").get(session.email, { type: "json" }) : null;
   const jobId = randomUUID();
   const jobs = getStore(SEND_JOBS_STORE);
   await jobs.setJSON(jobId, {
@@ -85,7 +92,7 @@ export default async (req: Request, context: Context) => {
     tenantId: session.tenantId,
     createdBy: session.email || "",
     createdAt: Date.now(),
-    senderName: (tenant && tenant.name) || "",
+    senderName,
     // Unsubscribe links point back at whichever site sent the email.
     baseUrl: new URL(req.url).origin,
     subject,

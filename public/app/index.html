@@ -551,19 +551,27 @@ function saveLeads(leads) { apiSet("leads", leads); }
 // Companies and Contacts are real, separate entities — not text fields on a
 // lead — so a company can have several linked contacts, and a contact's
 // classification tags double as what used to be separate "email lists".
-const emptyCompanyDraft = { name: "", industry: "", region: "", website: "", notes: "", marketId: "" };
-const MARKETING_STATUSES = ["Subscribed", "Unsubscribed", "Suppressed", "Pending confirmation", "Not eligible"];
+const emptyCompanyDraft = { name: "", industry: "", region: "", website: "", notes: "", marketId: "", phone: "", addressLine1: "", addressLine2: "", town: "", county: "", postcode: "", entityType: "" };
+// Sole traders and partnerships count as individuals under UK email marketing
+// rules (PECR), so their people need to opt in before being emailed.
+const ENTITY_TYPES = ["Limited company", "LLP", "PLC", "Sole trader", "Partnership", "Charity / non-profit", "Public sector", "Other"];
+const INDIVIDUAL_ENTITY_TYPES = ["Sole trader", "Partnership"];
+// "Prospect" is a business contact emailed under legitimate interests — it
+// doesn't claim they subscribed. "Awaiting opt-in" is held back from every send.
+const MARKETING_STATUSES = ["Subscribed", "Prospect", "Pending confirmation", "Awaiting opt-in", "Unsubscribed", "Suppressed", "Not eligible"];
 // "How was this contact obtained?" — stored in consentSource, with the date in
-// consentSourceDate and any detail in consentSourceDetail. Older contacts may
-// hold earlier values (e.g. "Manual entry"); those are still shown as-is.
-const OBTAINED_OPTIONS = ["Phone call", "Email enquiry", "Website form / sign-up", "Event or meeting", "Referral", "Existing customer relationship", "Business card / in person", "Created from lead", "Imported list", "Other"];
+// consentSourceDate and any detail in consentSourceDetail. "Purchased list"
+// also records who sold it in consentSupplier. Older contacts may hold earlier
+// values (e.g. "Manual entry"); those are still shown as-is.
+const OBTAINED_OPTIONS = ["Phone call", "Email enquiry", "Website form / sign-up", "Event or meeting", "Referral", "Existing customer relationship", "Business card / in person", "Created from lead", "Purchased list", "Imported list", "Other"];
 const UNKNOWN_BASIS = "Unknown basis";
 const CONSENT_BASES = [UNKNOWN_BASIS, "Consent (evidenced)", "Legitimate interests", "Existing customer"];
 // A contact with any of these statuses is never a real send target, no matter
 // what tag or sector filter matches them — unsubscribing suppresses future
-// marketing, it never deletes the underlying CRM record.
-const SUPPRESSED_STATUSES = ["Unsubscribed", "Suppressed", "Not eligible"];
-const emptyContactDraft = { name: "", email: "", phone: "", jobTitle: "", companyId: "", tags: [], notes: "", marketingStatus: "Pending confirmation", consentSource: "", consentSourceDate: "", consentSourceDetail: "", consentBasis: UNKNOWN_BASIS, consentEvidence: "", consentHistory: [] };
+// marketing, it never deletes the underlying CRM record. Keep in step with
+// SUPPRESSED_STATUSES in netlify/lib/email.mts.
+const SUPPRESSED_STATUSES = ["Unsubscribed", "Suppressed", "Not eligible", "Awaiting opt-in"];
+const emptyContactDraft = { name: "", email: "", phone: "", jobTitle: "", companyId: "", tags: [], notes: "", marketingStatus: "Pending confirmation", consentSource: "", consentSourceDate: "", consentSourceDetail: "", consentSupplier: "", consentBasis: UNKNOWN_BASIS, consentEvidence: "", consentHistory: [] };
 
 // A contact's basis only counts once someone has actually chosen it (basisSetAt
 // is stamped then). Contacts saved before this rule existed defaulted to
@@ -586,7 +594,7 @@ function contactToDraft(c, companyId) {
   return {
     name: c.name, email: c.email || "", phone: c.phone || "", jobTitle: c.jobTitle || "", companyId, tags: c.tags || [], notes: c.notes || "",
     marketingStatus: c.marketingStatus || "Pending confirmation",
-    consentSource: c.consentSource || "", consentSourceDate: c.consentSourceDate || "", consentSourceDetail: c.consentSourceDetail || "",
+    consentSource: c.consentSource || "", consentSourceDate: c.consentSourceDate || "", consentSourceDetail: c.consentSourceDetail || "", consentSupplier: c.consentSupplier || "",
     consentBasis: effectiveBasis(c), consentEvidence: c.consentEvidence || "", consentHistory: c.consentHistory || [],
   };
 }
@@ -1525,7 +1533,7 @@ function App({ tenant, onLogout, token, onUpdateTenant }) {
           {tab === "assets" && <AssetsView assets={assets} addAsset={addAsset} deleteAsset={deleteAsset} token={token} />}
           {tab === "company" && <CompanyInfoView companyInfo={companyInfo} setCompanyInfo={setCompanyInfo} setTab={setTab} setPendingTopic={setPendingTopic} />}
           {tab === "brand" && <BrandView brand={brand} setBrand={setBrand} />}
-          {tab === "questionnaires" && <QuestionnairesView templates={questionnaireTemplates} addTemplate={addQuestionnaireTemplate} updateTemplate={updateQuestionnaireTemplate} deleteTemplate={deleteQuestionnaireTemplate} questionnaireSubmissions={questionnaireSubmissions} addQuestionnaireSubmission={addQuestionnaireSubmission} questionnaireSends={questionnaireSends} addQuestionnaireSend={addQuestionnaireSend} updateQuestionnaireSend={updateQuestionnaireSend} connections={connections} leads={leads} brand={brand} setBrand={setBrand} products={products} tenantId={tenant.id} contacts={contacts} companies={companies} />}
+          {tab === "questionnaires" && <QuestionnairesView templates={questionnaireTemplates} addTemplate={addQuestionnaireTemplate} updateTemplate={updateQuestionnaireTemplate} deleteTemplate={deleteQuestionnaireTemplate} questionnaireSubmissions={questionnaireSubmissions} addQuestionnaireSubmission={addQuestionnaireSubmission} questionnaireSends={questionnaireSends} addQuestionnaireSend={addQuestionnaireSend} updateQuestionnaireSend={updateQuestionnaireSend} connections={connections} leads={leads} brand={brand} setBrand={setBrand} products={products} tenantId={tenant.id} contacts={contacts} companies={companies} companyInfo={companyInfo} setCompanyInfo={setCompanyInfo} />}
           {tab === "publish" && <PublishView posts={posts} campaigns={campaigns} connections={connections} setTab={setTab} addPost={addPost} updatePost={updatePost} deletePost={deletePost} />}
           {tab === "studio" && <StudioView addPost={addPost} addArticle={addArticle} deleteArticle={deleteArticle} articles={articles} products={products} personas={personas} connections={connections} brand={brand} setTab={setTab} pendingTopic={pendingTopic} clearPendingTopic={() => setPendingTopic("")} />}
           {tab === "products" && <ProductsView products={products} addProduct={addProduct} updateProduct={updateProduct} deleteProduct={deleteProduct} posts={posts} articles={articles} setTab={setTab} setPendingTopic={setPendingTopic} />}
@@ -3687,22 +3695,43 @@ function ConnectionsView({ connections, setConnections, setTab, setPendingTopic,
   function updateWebsite(next) { setConnections({ ...connections, website: next }); }
   function useTopic(title) { setPendingTopic(title); setTab("studio"); }
 
+  // Converting a list first asks how its people joined it; nothing is created
+  // until that's answered. { i, how, evidence } while the question is open.
+  const [pendingConvert, setPendingConvert] = useState(null);
+  const convertPanelRef = React.useRef(null);
+  const pendingConvertList = pendingConvert ? pendingConvert.i : null;
+  useEffect(() => {
+    if (pendingConvertList !== null && convertPanelRef.current) convertPanelRef.current.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [pendingConvertList]);
+  const CONVERT_CHOICES = {
+    unknown: { label: "Not sure", detail: "Awaiting opt-in — kept out of every email until they opt in", marketingStatus: "Awaiting opt-in", consentBasis: UNKNOWN_BASIS },
+    business: { label: "Business contacts", detail: "Prospect — emailed under legitimate interests", marketingStatus: "Prospect", consentBasis: "Legitimate interests" },
+    consent: { label: "They opted in", detail: "Subscribed — consent, with a note of how they opted in", marketingStatus: "Subscribed", consentBasis: "Consent (evidenced)" },
+  };
+
   // Converts a static email list's members into real, tagged Contact records
   // — the list name becomes a tag, so this list becomes a live segment
   // (any contact with that tag) instead of a separate, disconnected database.
-  function convertListToContacts(i) {
+  // Existing contacts only gain the tag; their consent is never changed.
+  function convertListToContacts(i, how, evidence) {
+    const choice = CONVERT_CHOICES[how];
     const list = emailLists[i];
     const listName = emailListName(list);
     const members = emailListMembers(list);
     let created = 0, tagged = 0;
+    const seen = new Set();
     members.forEach(raw => {
       const value = raw.trim();
       if (!value) return;
       const looksLikeEmail = value.includes("@");
       const email = looksLikeEmail ? value.toLowerCase() : "";
       const name = looksLikeEmail ? value.split("@")[0] : value;
+      // The same person listed twice only becomes one contact.
+      const seenKey = email || `name:${name.toLowerCase()}`;
+      if (seen.has(seenKey)) return;
+      seen.add(seenKey);
       const existing = contacts.find(c =>
-        (email && c.email && c.email.toLowerCase() === email) ||
+        (email && c.email && c.email.trim().toLowerCase() === email) ||
         (!email && !c.email && c.name.toLowerCase() === name.toLowerCase())
       );
       if (existing) {
@@ -3711,13 +3740,17 @@ function ConnectionsView({ connections, setConnections, setTab, setPendingTopic,
           tagged++;
         }
       } else {
-        // Nothing on a pasted list says how these people joined it, so they
-        // aren't marked as consented — Unknown basis until someone reviews them.
-        addContact({ ...emptyContactDraft, name, email, tags: [listName], consentSource: "Imported list", consentSourceDetail: `Email list "${listName}"`, consentBasis: UNKNOWN_BASIS });
+        addContact({
+          ...emptyContactDraft, name, email, tags: [listName],
+          consentSource: "Imported list", consentSourceDetail: `Email list "${listName}"`,
+          marketingStatus: choice.marketingStatus, consentBasis: choice.consentBasis,
+          consentEvidence: how === "consent" ? evidence.trim() : "",
+        });
         created++;
       }
     });
-    setConvertResult({ listName, created, tagged });
+    setPendingConvert(null);
+    setConvertResult({ listName, created, tagged, status: choice.marketingStatus });
   }
 
   return (
@@ -3728,11 +3761,36 @@ function ConnectionsView({ connections, setConnections, setTab, setPendingTopic,
       </div>
       {convertResult && (
         <div style={{ maxWidth: 640, background: `${C.teal}14`, border: `1px solid ${C.teal}`, borderRadius: 8, padding: "10px 14px", marginBottom: 16, fontSize: 12.5, color: C.inkMuted, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span>"{convertResult.listName}" converted — {convertResult.created} contact{convertResult.created === 1 ? "" : "s"} created, {convertResult.tagged} tagged. View them under <button onClick={() => setTab("companies")} style={{ background: "none", border: "none", color: C.teal, cursor: "pointer", textDecoration: "underline", padding: 0, font: "inherit" }}>Companies</button>.</span>
+          <span>"{convertResult.listName}" converted — {convertResult.created} contact{convertResult.created === 1 ? "" : "s"} created{convertResult.created > 0 ? ` as ${convertResult.status}` : ""}, {convertResult.tagged} existing contact{convertResult.tagged === 1 ? "" : "s"} tagged (their consent is unchanged). View them under <button onClick={() => setTab("companies")} style={{ background: "none", border: "none", color: C.teal, cursor: "pointer", textDecoration: "underline", padding: 0, font: "inherit" }}>Companies</button>.</span>
           <button onClick={() => setConvertResult(null)} style={{ background: "none", border: "none", color: C.inkFaint, cursor: "pointer" }}><Icon name="x" size={13} /></button>
         </div>
       )}
-      <ConnectionsEditor social={social} socialHandles={socialHandles} emailLists={emailLists} website={website} onUpdateWebsite={updateWebsite} onToggleSocial={toggleSocial} onAddList={addList} onRemoveList={removeList} onUpdateMembers={updateListMembers} onConvertList={convertListToContacts} />
+      {pendingConvert && (() => {
+        const list = emailLists[pendingConvert.i];
+        const needsEvidence = pendingConvert.how === "consent" && !(pendingConvert.evidence || "").trim();
+        return (
+          <div ref={convertPanelRef} style={{ maxWidth: 640, background: C.surface, border: `1px solid ${C.teal}`, borderRadius: 8, padding: "12px 14px", marginBottom: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>How did the people on "{list ? emailListName(list) : ""}" join this list?</div>
+            <div style={{ fontSize: 11.5, color: C.inkFaint, marginBottom: 10 }}>This sets the marketing status of the new contacts it creates. People who are already contacts just get the list tag — their consent isn't changed.</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {Object.entries(CONVERT_CHOICES).map(([key, c]) => (
+                <label key={key} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12.5, cursor: "pointer" }}>
+                  <input type="radio" name="convert-how" checked={pendingConvert.how === key} onChange={() => setPendingConvert({ ...pendingConvert, how: key })} style={{ marginTop: 3 }} />
+                  <span><strong>{c.label}</strong> <span style={{ color: C.inkFaint }}>— {c.detail}</span></span>
+                </label>
+              ))}
+            </div>
+            {pendingConvert.how === "consent" && (
+              <input value={pendingConvert.evidence || ""} onChange={e => setPendingConvert({ ...pendingConvert, evidence: e.target.value })} style={{ ...inputStyle, width: "100%", fontSize: 12, marginTop: 8, borderColor: needsEvidence ? C.rose : undefined }} placeholder="Record of how they opted in (required) — e.g. newsletter sign-up form on our website" />
+            )}
+            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+              <button onClick={() => convertListToContacts(pendingConvert.i, pendingConvert.how, pendingConvert.evidence || "")} disabled={needsEvidence} style={{ background: C.teal, color: "#032430", border: "none", padding: "6px 14px", borderRadius: 6, fontSize: 12.5, fontWeight: 600, cursor: needsEvidence ? "default" : "pointer", opacity: needsEvidence ? 0.5 : 1 }}>Convert to contacts</button>
+              <button onClick={() => setPendingConvert(null)} style={{ background: "none", border: `1px solid ${C.border}`, color: C.inkMuted, padding: "6px 14px", borderRadius: 6, fontSize: 12.5, cursor: "pointer" }}>Cancel</button>
+            </div>
+          </div>
+        );
+      })()}
+      <ConnectionsEditor social={social} socialHandles={socialHandles} emailLists={emailLists} website={website} onUpdateWebsite={updateWebsite} onToggleSocial={toggleSocial} onAddList={addList} onRemoveList={removeList} onUpdateMembers={updateListMembers} onConvertList={i => { setConvertResult(null); setPendingConvert({ i, how: "unknown", evidence: "" }); }} />
       <WebsiteActivityPanel website={website} onUseTopic={useTopic} />
     </div>
   );
@@ -4768,7 +4826,11 @@ function QuestionnaireResults({ template, submissions, brand, setBrand, products
   );
 }
 
-function DistributionPanel({ template, connections, leads, sends, onSend, onUpdateSend, submissions, tenantId, contacts, companies }) {
+function DistributionPanel({ template, connections, leads, sends, onSend, onUpdateSend, submissions, tenantId, contacts, companies, companyInfo, setCompanyInfo }) {
+  // Emails go out under the workspace's chosen sender name (Company Info);
+  // the server refuses to send until one is set.
+  const senderName = ((companyInfo && companyInfo.emailSenderName) || "").trim();
+  const [senderDraft, setSenderDraft] = useState("");
   const [audienceType, setAudienceType] = useState("email");
   const [linkCopied, setLinkCopied] = useState(false);
   const [audienceRef, setAudienceRef] = useState("");
@@ -4801,6 +4863,9 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
   async function attemptRealSend(recipients, emailCandidates) {
     setSending(true); setSendResult(null);
     try {
+      // A sender name saved moments ago may still be on its way to the server,
+      // which checks it — give that save a few seconds to land first.
+      for (let waited = 0; __hasPending("company_info") && waited < 10000; waited += 250) await new Promise(r => setTimeout(r, 250));
       const fullMessage = `${message}\n\nTake the survey here: ${shareLink}`;
       const res = await fetch("/api/send-email", {
         method: "POST",
@@ -4875,10 +4940,10 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
     attemptRealSend(recipients, recipients);
   }
 
-  const canSend = audienceType === "custom" ? customRecipients.length > 0
+  const canSend = !!senderName && (audienceType === "custom" ? customRecipients.length > 0
     : audienceType === "leads" ? leads.length > 0
     : audienceType === "tag" ? (!!audienceRef || !!sectorFilter)
-    : !!audienceRef;
+    : !!audienceRef);
   const templateSends = sends.filter(s => s.templateId === template.id);
   const templateSubmissions = submissions.filter(s => s.templateId === template.id);
 
@@ -4975,6 +5040,20 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
       <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: 18, marginBottom: 20 }}>
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>Message</div>
         <div style={{ marginBottom: 10 }}>
+          <label style={{ fontSize: 11.5, color: C.inkMuted, display: "block", marginBottom: 4 }}>From</label>
+          {senderName ? (
+            <div style={{ fontSize: 12.5, color: C.ink }}>{senderName} <span style={{ fontSize: 11, color: C.inkFaint }}>— change it under Company Info → Email sender name</span></div>
+          ) : (
+            <div style={{ background: `${C.amber}10`, border: `1px solid ${C.amber}`, borderRadius: 6, padding: 10 }}>
+              <div style={{ fontSize: 11.5, color: C.inkMuted, marginBottom: 6 }}>Choose the name people will see in their inbox. It's saved to Company Info and used for every email this workspace sends.</div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input value={senderDraft} onChange={e => setSenderDraft(e.target.value)} maxLength={60} style={{ ...inputStyle, flex: 1 }} placeholder={companyInfo && companyInfo.name ? `e.g. ${companyInfo.name.trim()}` : "Sender name"} />
+                <button onClick={() => { if (senderDraft.trim() && setCompanyInfo) setCompanyInfo({ ...companyInfo, emailSenderName: senderDraft.trim() }); }} disabled={!senderDraft.trim()} style={{ background: C.amber, color: "#3D2A00", border: "none", padding: "0 14px", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: senderDraft.trim() ? "pointer" : "default", opacity: senderDraft.trim() ? 1 : 0.5 }}>Save sender name</button>
+              </div>
+            </div>
+          )}
+        </div>
+        <div style={{ marginBottom: 10 }}>
           <label style={{ fontSize: 11.5, color: C.inkMuted, display: "block", marginBottom: 4 }}>Subject</label>
           <input value={subject} onChange={e => setSubject(e.target.value)} style={{ ...inputStyle, width: "100%" }} />
         </div>
@@ -5068,7 +5147,7 @@ function DistributionPanel({ template, connections, leads, sends, onSend, onUpda
   );
 }
 
-function QuestionnaireTemplateView({ template, submissions, sends, connections, leads, brand, setBrand, addSubmission, addSend, updateSend, products, tenantId, contacts, companies }) {
+function QuestionnaireTemplateView({ template, submissions, sends, connections, leads, brand, setBrand, addSubmission, addSend, updateSend, products, tenantId, contacts, companies, companyInfo, setCompanyInfo }) {
   const [mode, setMode] = useState(submissions.length === 0 ? "survey" : "results");
   function handleSubmit(sub) {
     addSubmission(sub);
@@ -5083,7 +5162,7 @@ function QuestionnaireTemplateView({ template, submissions, sends, connections, 
       </div>
       {mode === "survey" && <QuestionnaireSurvey key={template.id} template={template} onSubmit={handleSubmit} onCancel={() => setMode("results")} />}
       {mode === "results" && <QuestionnaireResults template={template} submissions={submissions} brand={brand} setBrand={setBrand} products={products} />}
-      {mode === "distribute" && <DistributionPanel template={template} connections={connections} leads={leads} sends={sends} onSend={addSend} onUpdateSend={updateSend} submissions={submissions} tenantId={tenantId} contacts={contacts} companies={companies} />}
+      {mode === "distribute" && <DistributionPanel template={template} connections={connections} leads={leads} sends={sends} onSend={addSend} onUpdateSend={updateSend} submissions={submissions} tenantId={tenantId} contacts={contacts} companies={companies} companyInfo={companyInfo} setCompanyInfo={setCompanyInfo} />}
     </div>
   );
 }
@@ -5536,7 +5615,7 @@ function QuestionnaireAiAssist({ onGenerated, onCancel, products }) {
   );
 }
 
-function QuestionnairesView({ templates, addTemplate, updateTemplate, deleteTemplate, questionnaireSubmissions, addQuestionnaireSubmission, questionnaireSends, addQuestionnaireSend, updateQuestionnaireSend, connections, leads, brand, setBrand, products, tenantId, contacts, companies }) {
+function QuestionnairesView({ templates, addTemplate, updateTemplate, deleteTemplate, questionnaireSubmissions, addQuestionnaireSubmission, questionnaireSends, addQuestionnaireSend, updateQuestionnaireSend, connections, leads, brand, setBrand, products, tenantId, contacts, companies, companyInfo, setCompanyInfo }) {
   const [templateId, setTemplateId] = useState(templates[0] ? templates[0].id : "");
   const [flow, setFlow] = useState(null); // null | "choose" | "ai" | "builder"
   const [editingId, setEditingId] = useState(null);
@@ -5634,6 +5713,8 @@ function QuestionnairesView({ templates, addTemplate, updateTemplate, deleteTemp
               tenantId={tenantId}
               contacts={contacts}
               companies={companies}
+              companyInfo={companyInfo}
+              setCompanyInfo={setCompanyInfo}
             />
           ) : (
             <div style={{ padding: "20px 0", color: C.inkMuted, fontSize: 14 }}>No questionnaires yet — create one to get started.</div>
@@ -6091,6 +6172,12 @@ function CompanyInfoPanel({ companyInfo, setCompanyInfo, onOverviewRegenerate })
         <div style={{ display: "flex", gap: 12, marginBottom: 28 }}>
           <Field label="Email"><input value={companyInfo.contactEmail} onChange={e => setCompanyInfo({ ...companyInfo, contactEmail: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder="hello@yourbusiness.com" /></Field>
           <Field label="Phone"><input value={companyInfo.contactPhone} onChange={e => setCompanyInfo({ ...companyInfo, contactPhone: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder="+44 20 1234 5678" /></Field>
+        </div>
+
+        <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, marginBottom: 4 }}>Email sender name</h3>
+        <div style={{ fontSize: 12, color: C.inkFaint, marginBottom: 10 }}>The name people see in their inbox when you send marketing emails, and in the unsubscribe footer. Emails can't be sent until this is set.</div>
+        <div style={{ display: "flex", gap: 12, marginBottom: 28, maxWidth: 420 }}>
+          <input value={companyInfo.emailSenderName || ""} onChange={e => setCompanyInfo({ ...companyInfo, emailSenderName: e.target.value })} style={{ ...inputStyle, width: "100%" }} placeholder={companyInfo.name ? `e.g. ${companyInfo.name.trim()}` : "e.g. Vi-Tech"} maxLength={60} />
         </div>
 
         <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 700, marginBottom: 12 }}>FAQs</h3>
@@ -7306,6 +7393,9 @@ function ContactForm({ draft, setDraft, onCancel, onSubmit, isEdit, companies })
           </select>
           <input type="date" value={draft.consentSourceDate || todayISO()} onChange={e => setDraft({ ...draft, consentSourceDate: e.target.value })} style={{ ...inputStyle, fontSize: 11.5, padding: "6px 8px" }} title="Date obtained" />
         </div>
+        {draft.consentSource === "Purchased list" && (
+          <input value={draft.consentSupplier || ""} onChange={e => setDraft({ ...draft, consentSupplier: e.target.value })} style={{ ...inputStyle, width: "100%", fontSize: 11.5, padding: "6px 8px", marginBottom: 6, borderColor: (draft.consentSupplier || "").trim() ? undefined : C.rose }} placeholder="Supplier — who sold you the list (required)" />
+        )}
         <input value={draft.consentSourceDetail || ""} onChange={e => setDraft({ ...draft, consentSourceDetail: e.target.value })} style={{ ...inputStyle, width: "100%", fontSize: 11.5, padding: "6px 8px", marginBottom: 10 }} placeholder="Detail (optional) — e.g. which event, who referred them" />
         <div style={{ fontSize: 10.5, fontWeight: 700, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>Marketing</div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
@@ -7323,6 +7413,8 @@ function ContactForm({ draft, setDraft, onCancel, onSubmit, isEdit, companies })
           <div style={{ fontSize: 10.5, color: C.amber, marginTop: 6, lineHeight: 1.4 }}>This contact will be excluded from every real send, regardless of tags or sector — their record stays, only marketing to them stops.</div>
         ) : (draft.consentBasis || UNKNOWN_BASIS) === UNKNOWN_BASIS ? (
           <div style={{ fontSize: 10.5, color: C.amber, marginTop: 6, lineHeight: 1.4 }}>Unknown basis — this contact won't receive marketing emails until a basis is chosen.</div>
+        ) : draft.marketingStatus === "Prospect" && draft.consentBasis !== "Legitimate interests" ? (
+          <div style={{ fontSize: 10.5, color: C.inkFaint, marginTop: 6, lineHeight: 1.4 }}>Prospects are usually business contacts emailed under Legitimate interests.</div>
         ) : null}
         {draft.consentHistory && draft.consentHistory.length > 0 && (
           <div style={{ fontSize: 10, color: C.inkFaint, marginTop: 6 }}>
@@ -7333,8 +7425,9 @@ function ContactForm({ draft, setDraft, onCancel, onSubmit, isEdit, companies })
       <textarea value={draft.notes} onChange={e => setDraft({ ...draft, notes: e.target.value })} rows={2} style={{ ...inputStyle, width: "100%", fontSize: 12, resize: "vertical", marginBottom: 10 }} placeholder="Notes (optional)" />
       <div style={{ display: "flex", gap: 8 }}>
         {(() => {
-          const ok = draft.name.trim() && (isEdit || draft.consentSource) && (draft.consentBasis !== "Consent (evidenced)" || (draft.consentEvidence || "").trim());
-          return <button onClick={onSubmit} disabled={!ok} title={ok ? "" : "Name, how they were obtained, and (for evidenced consent) the opt-in record are required"} style={{ background: C.rose, color: "#fff", border: "none", padding: "7px 14px", borderRadius: 6, fontSize: 12.5, fontWeight: 600, cursor: ok ? "pointer" : "default", opacity: ok ? 1 : 0.5 }}>{isEdit ? "Save changes" : "Save contact"}</button>;
+          const ok = draft.name.trim() && (isEdit || draft.consentSource) && (draft.consentBasis !== "Consent (evidenced)" || (draft.consentEvidence || "").trim())
+            && (draft.consentSource !== "Purchased list" || (draft.consentSupplier || "").trim());
+          return <button onClick={onSubmit} disabled={!ok} title={ok ? "" : "Name, how they were obtained, the supplier (for a purchased list) and the opt-in record (for evidenced consent) are required"} style={{ background: C.rose, color: "#fff", border: "none", padding: "7px 14px", borderRadius: 6, fontSize: 12.5, fontWeight: 600, cursor: ok ? "pointer" : "default", opacity: ok ? 1 : 0.5 }}>{isEdit ? "Save changes" : "Save contact"}</button>;
         })()}
         <button onClick={onCancel} style={{ background: "none", border: `1px solid ${C.border}`, color: C.inkMuted, padding: "7px 14px", borderRadius: 6, fontSize: 12.5, cursor: "pointer" }}>Cancel</button>
       </div>
@@ -7505,6 +7598,9 @@ function ContactRow({ contact, onEdit, onDelete, activities, onAddActivity, onDe
             {SUPPRESSED_STATUSES.includes(contact.marketingStatus) && (
               <span style={{ fontSize: 9.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3, color: C.amber, border: `1px solid ${C.amber}`, borderRadius: 4, padding: "1px 5px" }}>{contact.marketingStatus}</span>
             )}
+            {contact.marketingStatus === "Prospect" && (
+              <span title={contact.consentSupplier ? `Purchased list — ${contact.consentSupplier}` : "Business contact, emailed under legitimate interests"} style={{ fontSize: 9.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3, color: C.teal, border: `1px solid ${C.teal}`, borderRadius: 4, padding: "1px 5px" }}>Prospect</span>
+            )}
             {!SUPPRESSED_STATUSES.includes(contact.marketingStatus) && effectiveBasis(contact) === UNKNOWN_BASIS && (
               <span title="No marketing emails until a consent basis is chosen" style={{ fontSize: 9.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3, color: C.inkFaint, border: `1px solid ${C.border}`, borderRadius: 4, padding: "1px 5px" }}>Unknown basis</span>
             )}
@@ -7550,6 +7646,33 @@ function ContactRow({ contact, onEdit, onDelete, activities, onAddActivity, onDe
   );
 }
 
+// Phone, business type and address — shared by the New company and edit forms.
+// Rendered inside their two-column grid.
+function CompanyDetailFields({ draft, setDraft }) {
+  const set = (k, v) => setDraft({ ...draft, [k]: v });
+  const field = { ...inputStyle, fontSize: 13 };
+  return (
+    <React.Fragment>
+      <input value={draft.phone || ""} onChange={e => set("phone", e.target.value)} style={field} placeholder="Phone" />
+      <select value={draft.entityType || ""} onChange={e => set("entityType", e.target.value)} style={field} title="Type of business">
+        <option value="">Type of business (optional)</option>
+        {ENTITY_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+      </select>
+      {INDIVIDUAL_ENTITY_TYPES.includes(draft.entityType) && (
+        <div style={{ gridColumn: "1 / -1", fontSize: 10.5, color: C.amber, lineHeight: 1.4 }}>Sole traders and partnerships count as individuals for email marketing — their people need to opt in before you email them.</div>
+      )}
+      <input value={draft.addressLine1 || ""} onChange={e => set("addressLine1", e.target.value)} style={{ ...field, gridColumn: "1 / -1" }} placeholder="Address line 1" />
+      <input value={draft.addressLine2 || ""} onChange={e => set("addressLine2", e.target.value)} style={{ ...field, gridColumn: "1 / -1" }} placeholder="Address line 2 (optional)" />
+      <input value={draft.town || ""} onChange={e => set("town", e.target.value)} style={field} placeholder="Town / city" />
+      <input value={draft.county || ""} onChange={e => set("county", e.target.value)} style={field} placeholder="County (optional)" />
+      <input value={draft.postcode || ""} onChange={e => set("postcode", e.target.value)} style={field} placeholder="Postcode" />
+    </React.Fragment>
+  );
+}
+function companyAddress(co) {
+  return [co.addressLine1, co.addressLine2, co.town, co.county, co.postcode].map(s => (s || "").trim()).filter(Boolean).join(", ");
+}
+
 function CompanyCard({ company, contacts, onUpdateCompany, onDeleteCompany, onAddContact, onUpdateContact, onDeleteContact, activities, onAddActivity, onDeleteActivity, companies, tasks, onAddTask, onUpdateTask, onDeleteTask, documents, onAddDocument, onDeleteDocument, markets, teamMembers }) {
   const [expanded, setExpanded] = useState(false);
   const [editingCompany, setEditingCompany] = useState(false);
@@ -7578,6 +7701,7 @@ function CompanyCard({ company, contacts, onUpdateCompany, onDeleteCompany, onAd
           <input value={companyDraft.industry} onChange={e => setCompanyDraft({ ...companyDraft, industry: e.target.value })} style={{ ...inputStyle, fontSize: 13 }} placeholder="Industry" />
           <input value={companyDraft.region} onChange={e => setCompanyDraft({ ...companyDraft, region: e.target.value })} style={{ ...inputStyle, fontSize: 13 }} placeholder="Region" />
           <input value={companyDraft.website} onChange={e => setCompanyDraft({ ...companyDraft, website: e.target.value })} style={{ ...inputStyle, fontSize: 13 }} placeholder="Website" />
+          <CompanyDetailFields draft={companyDraft} setDraft={setCompanyDraft} />
           {markets && (
             <select value={companyDraft.marketId || ""} onChange={e => setCompanyDraft({ ...companyDraft, marketId: e.target.value })} style={{ ...inputStyle, fontSize: 13, gridColumn: "1 / -1" }}>
               <option value="">No target market linked</option>
@@ -7599,6 +7723,11 @@ function CompanyCard({ company, contacts, onUpdateCompany, onDeleteCompany, onAd
             </div>
             <div style={{ fontSize: 12, color: C.inkMuted, marginTop: 2 }}>{[company.industry, company.region].filter(Boolean).join(" · ")}</div>
             {company.website && <div onClick={e => e.stopPropagation()} style={{ fontSize: 11.5, color: C.teal, marginTop: 2, cursor: "text", width: "fit-content" }}>{company.website}</div>}
+            {(companyAddress(company) || company.phone || company.entityType) && (
+              <div onClick={e => e.stopPropagation()} style={{ fontSize: 11.5, color: C.inkMuted, marginTop: 2, cursor: "text", width: "fit-content" }}>
+                {[company.entityType, companyAddress(company), company.phone].filter(Boolean).join(" · ")}
+              </div>
+            )}
             {company.marketId && markets && (() => { const m = markets.find(x => x.id === company.marketId); return m ? <div style={{ fontSize: 10.5, color: C.inkFaint, marginTop: 2 }}>Target market: {m.name}</div> : null; })()}
             {!expanded && contacts.length > 0 && (
               <div style={{ fontSize: 12, color: C.inkMuted, marginTop: 6 }}>
@@ -7902,7 +8031,7 @@ function ConsentReviewPanel({ contacts, companies, updateContact }) {
                   {(!c.consentSource || !OBTAINED_OPTIONS.includes(c.consentSource)) && (
                     <select value={e.source || ""} onChange={ev => edit(c.id, { source: ev.target.value })} style={small}>
                       <option value="">How obtained? (optional)</option>
-                      {OBTAINED_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+                      {OBTAINED_OPTIONS.filter(s => s !== "Purchased list").map(s => <option key={s} value={s}>{s}</option>)}
                     </select>
                   )}
                   <select value={e.basis || UNKNOWN_BASIS} onChange={ev => edit(c.id, { basis: ev.target.value })} style={small}>
@@ -7962,6 +8091,7 @@ function CompaniesView({ companies, contacts, addCompany, updateCompany, deleteC
             <input value={draft.industry} onChange={e => setDraft({ ...draft, industry: e.target.value })} style={{ ...inputStyle, fontSize: 13 }} placeholder="Industry" />
             <input value={draft.region} onChange={e => setDraft({ ...draft, region: e.target.value })} style={{ ...inputStyle, fontSize: 13 }} placeholder="Region" />
             <input value={draft.website} onChange={e => setDraft({ ...draft, website: e.target.value })} style={{ ...inputStyle, fontSize: 13 }} placeholder="Website" />
+            <CompanyDetailFields draft={draft} setDraft={setDraft} />
             {markets && (
               <select value={draft.marketId || ""} onChange={e => setDraft({ ...draft, marketId: e.target.value })} style={{ ...inputStyle, fontSize: 13, gridColumn: "1 / -1" }}>
                 <option value="">No target market linked</option>

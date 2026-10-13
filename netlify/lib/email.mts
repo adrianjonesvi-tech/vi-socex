@@ -14,7 +14,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 export const SUPPRESSION_STORE = "visocex-suppressions";
 export const SEND_JOBS_STORE = "visocex-send-jobs";
 // Keep in step with SUPPRESSED_STATUSES and effectiveBasis() in public/app/index.html.
-export const SUPPRESSED_STATUSES = ["Unsubscribed", "Suppressed", "Not eligible"];
+export const SUPPRESSED_STATUSES = ["Unsubscribed", "Suppressed", "Not eligible", "Awaiting opt-in"];
 const BASES = ["Unknown basis", "Consent (evidenced)", "Legitimate interests", "Existing customer"];
 
 // A basis only counts once someone has chosen it (basisSetAt). Older contacts
@@ -30,6 +30,17 @@ type StoreFactory = (name: any) => any;
 
 export function normEmail(s: unknown) {
   return String(s ?? "").trim().toLowerCase();
+}
+
+// The workspace's chosen sender name, made safe for an email From header:
+// no line breaks, quotes, angle brackets or backslashes, at most 60 characters.
+export function cleanSenderName(s: unknown) {
+  return String(s ?? "").replace(/[\u0000-\u001f\u007f"<>\\]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60).trim();
+}
+
+export function fromHeader(name: string, address: string) {
+  const n = cleanSenderName(name);
+  return n ? `"${n}" <${address}>` : address;
 }
 
 export function isValidEmail(s: string) {

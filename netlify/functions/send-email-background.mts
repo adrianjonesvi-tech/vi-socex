@@ -1,6 +1,6 @@
 import type { Context, Config } from "@netlify/functions";
 import { getStore } from "@netlify/blobs";
-import { SEND_JOBS_STORE, suppressedEmails, unsubscribeUrl, withFooter } from "../lib/email.mts";
+import { SEND_JOBS_STORE, fromHeader, suppressedEmails, unsubscribeUrl, withFooter } from "../lib/email.mts";
 
 // Background function (answers 202 immediately, runs up to 15 minutes). Sends
 // a job queued by send-email.mts through Resend's batch endpoint, 100 emails
@@ -53,8 +53,8 @@ export default async (req: Request, context: Context) => {
 
   const apiKey = Netlify.env.get("RESEND_KEY");
   const fromAddress = (Netlify.env.get("RESEND_FROM_EMAIL") || "onboarding@resend.dev").trim();
-  const fromName = (Netlify.env.get("RESEND_FROM_NAME") || "").trim();
-  const from = fromName ? `${fromName} <${fromAddress}>` : fromAddress;
+  // The workspace's chosen sender name, saved on the job when it was queued.
+  const from = fromHeader(job.senderName || Netlify.env.get("RESEND_FROM_NAME") || "", fromAddress);
   const started = Date.now();
   const save = () => jobs.setJSON(jobId, job);
 
